@@ -196,6 +196,12 @@ suiteGroup('Models.Event', function() {
     assert.equal(subject.calendarId, 7);
   });
 
+  test('#calendarId with string input', function() {
+    subject.calendarId = '7';
+    assert.strictEqual(rawEvent.calendarId, 7);
+    assert.strictEqual(subject.calendarId, 7);
+  });
+
   test('#_id', function() {
     rawEvent._id = 'foo';
 
@@ -211,17 +217,66 @@ suiteGroup('Models.Event', function() {
       assert.ok(!event.validationErrors(), 'has no errors');
     });
 
-    test('start date > end date', function() {
+    function hasError(event, type) {
+      var errors = event.validationErrors();
+      assert.length(errors, 1);
+      assert.deepEqual(
+        errors[0], {
+          name: type
+        },
+        'has error: "' + type + '"'
+      );
+    }
+
+    test('start date >(=) end date', function() {
       var event = new Calendar.Models.Event();
       event.startDate = new Date(2020, 0, 2);
       event.endDate = new Date(2012, 0, 1);
 
-      var errors = event.validationErrors();
+      // start date > end date
+      hasError(event, 'start-after-end');
+      // start date == end date
+      event.startDate = new Date(event.endDate.valueOf());
+      hasError(event, 'start-after-end');
+    });
+  });
 
-      assert.length(errors, 1);
-      assert.deepEqual(errors[0], {
-        name: 'start-after-end'
+  suite('update attributes', function() {
+    var eventWithoutErrors;
+    var eventWithErrors;
+    var event;
+    var model;
+    setup(function() {
+      event = Factory.create('event', {
+        remote: {
+          syncToken: '7ee',
+          startDate: new Date(2019, 1, 2),
+          endDate: new Date(2020, 0, 2),
+          start: Calendar.Calc.dateToTransport(start),
+          end: Calendar.Calc.dateToTransport(end)
+        }
       });
+      model = new Calendar.Models.Event(event);
+      eventWithoutErrors = {
+        startDate: new Date(2019, 1, 2),
+        endDate: new Date(2020, 1, 2)
+      };
+      eventWithErrors = {
+        startDate: new Date(2019, 1, 2),
+        endDate: new Date(2019, 0, 2)
+      };
+    });
+
+    test('does not update attributes', function() {
+      var errors = model.updateAttributes(eventWithErrors);
+      assert.ok(errors);
+      assert.deepEqual(errors[0].name, 'start-after-end');
+    });
+
+    test('will update attributes', function() {
+      var errors = model.updateAttributes(eventWithoutErrors);
+      assert.strictEqual(errors, true);
+      assert.deepEqual(model.endDate, eventWithoutErrors.endDate);
     });
   });
 

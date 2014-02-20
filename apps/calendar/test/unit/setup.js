@@ -313,11 +313,14 @@
   });
 
   requireApp('calendar/shared/js/l10n_date.js');
+  requireApp('calendar/shared/js/lazy_loader.js');
 
   requireLib('calendar.js');
+  requireLib('error.js');
   requireApp('calendar/test/unit/loader.js');
   requireLib('responder.js');
   requireLib('calc.js');
+  requireLib('load_config.js');
   requireLib('view.js');
   requireLib('router.js');
   requireLib('interval_tree.js');
@@ -333,6 +336,7 @@
   requireSupport('mock_provider.js');
   requireLib('worker/manager.js');
   requireLib('controllers/service.js');
+  requireLib('controllers/error.js');
   requireLib('controllers/time.js');
   requireLib('controllers/sync.js');
   requireLib('controllers/alarm.js');

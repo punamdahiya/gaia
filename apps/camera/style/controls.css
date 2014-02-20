@@ -1,0 +1,227 @@
+
+.controls {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  left: 0;
+  height: 4.5rem;
+  z-index: 50;
+  background-color: rgba(0, 0, 0, 0.8);
+  overflow: hidden;
+}
+
+.switch-button,
+.capture-button,
+.misc-button {
+  position: absolute;
+}
+
+.buttons-disabled .cancel-pick,
+.buttons-disabled .gallery-button,
+.buttons-disabled .capture-button,
+.buttons-disabled .switch-button {
+  pointer-events: none;
+}
+
+.switch-button,
+.misc-button {
+  height: 4.5rem;
+  width: 33%;
+}
+
+.switch-button span,
+.capture-button span,
+.gallery-button span,
+.cancel-pick span {
+  transition: transform 0.2s ease-in-out;
+  pointer-events: none;
+  background-position: center center;
+  background-repeat: no-repeat;
+  background-size: 3rem;
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  margin-left: -1.5rem;
+  margin-top: -1.5rem;
+  width: 3rem;
+  height: 3rem;
+}
+
+.misc-button {
+  text-align: center;
+  left: 0;
+}
+
+/** Video Timer
+ ---------------------------------------------------------*/
+
+.video-timer {
+  position:relative;
+  top:50%;
+  margin-top:-0.5em;
+}
+
+/** Gallery Button
+ ---------------------------------------------------------*/
+
+.gallery-button {
+  display: none;
+  width: 100%;
+  height: 100%;
+}
+
+/**
+ * @gallery=true
+ */
+
+.controls[data-gallery=true] .gallery-button {
+  display: block;
+}
+
+/**
+ * @recording=true
+ */
+
+.controls[data-recording=true] .gallery-button {
+  display: none;
+}
+
+/** Gallery Button Icon
+ ---------------------------------------------------------*/
+
+.gallery-button span {
+  background-image: url(images/grid.png);
+}
+
+/** Cancel Pick Button
+ ---------------------------------------------------------*/
+
+.cancel-pick {
+  display: none;
+  width: 100%;
+  height: 100%;
+}
+
+/**
+ * @cancel
+ */
+
+.controls[data-cancel=true] .cancel-pick {
+  display: block;
+}
+
+/** Cancel Pick Button Icon
+ ---------------------------------------------------------*/
+
+.cancel-pick span {
+  background-image: url(images/actionicon_cancel.png);
+}
+
+/** Video Timer
+ ---------------------------------------------------------*/
+
+.video-timer {
+  display: none;
+  font-size: 1.8rem;
+  color: white;
+}
+
+/**
+ * @capturing
+ */
+
+.controls[data-recording=true] .video-timer {
+  display: block;
+}
+
+/** Capture Button
+ ---------------------------------------------------------*/
+
+.capture-button {
+  background-color: #03a2b4;
+  border-radius: 10rem;
+  left: 33%;
+  height: 10rem;
+  width: 33%;
+  top: -2.8rem;
+}
+
+/**
+ * @recording
+ */
+
+.controls[data-recording=true] .capture-button {
+  background-color: #d3361c;
+}
+
+/** Capture Button Icon
+ ---------------------------------------------------------*/
+
+/**
+ * @photo
+ */
+
+.controls[data-mode=photo] .capture-button span {
+  background-image: url(images/camera.png);
+}
+
+/**
+ * @video
+ */
+
+.controls[data-mode=video] .capture-button span {
+  background-image: url(images/video.png);
+}
+
+/**
+ * @capturing
+ */
+
+.controls[data-recording=true] .capture-button span {
+  background-image: url(images/stop.png);
+}
+
+/** Switch Button
+ ---------------------------------------------------------*/
+
+.switch-button {
+  display: none;
+  left: 66%;
+}
+
+.controls[data-switchable] .switch-button {
+  display: block;
+}
+
+/**
+ * @recording
+ */
+
+.controls[data-recording=true] .switch-button {
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+/** Switch Button Icon
+ ---------------------------------------------------------*/
+
+/**
+ * @video
+ *
+ * Swap the camera and video
+ * icons depending on mode
+ */
+.controls[data-mode=video] .switch-button span {
+  background-image: url(images/camera.png);
+}
+
+/**
+ * @photo
+ */
+
+.controls[data-mode=photo] .switch-button span {
+  background-image: url(images/video.png);
+}
+
+

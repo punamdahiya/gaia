@@ -1,6 +1,7 @@
 {
   "name": "Send To Bluetooth Device",
   "type": "certified",
+  "role": "system",
   "description": "Gaia Bluetooth Transfer",
   "launch_path": "/transfer.html",
   "developer": {
@@ -14,19 +15,20 @@
     }
   },
   "icons": {
-    "30": "/style/icons/icon30.png",
-    "60": "/style/icons/icon60.png"
+    "60": "/style/icons/60/Bluetooth.png",
+    "120": "/style/icons/Bluetooth.png"
   },
-  "orientation": "portrait-primary",
+  "orientation": "default",
   "activities": {
     "share": {
       "filters": {
-      	"number": 1
+        "type": ["image/*", "audio/*", "video/*", "text/vcard"],
+        "blobs": { "required":true }
        },
       "disposition": "inline",
       "returnValue": true,
       "href": "/transfer.html"
-    }   
+    }
   },
   "permissions": {
     "bluetooth":{},

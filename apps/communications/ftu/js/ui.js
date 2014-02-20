@@ -10,46 +10,69 @@ var UIManager = {
     'splash-screen',
     'activation-screen',
     'progress-bar',
+    'progress-bar-state',
     'finish-screen',
     'nav-bar',
     'main-title',
     // Unlock SIM Screen
     'unlock-sim-screen',
     'unlock-sim-header',
+    'unlock-sim-back',
     // PIN Screen
     'pincode-screen',
     'pin-label',
+    'pin-retries-left',
     'pin-input',
-    'fake-pin-input',
+    'back-sim-button',
     'pin-error',
     'skip-pin-button',
     'unlock-sim-button',
     // PUK Screen
     'pukcode-screen',
     'puk-label',
+    'puk-retries-left',
     'puk-input',
     'puk-info',
-    'fake-puk-input',
     'puk-error',
     'newpin-input',
-    'fake-newpin-input',
     'newpin-error',
     'confirm-newpin-input',
-    'fake-confirm-newpin-input',
     'confirm-newpin-error',
     // XCK Screen
     'xckcode-screen',
     'xck-label',
+    'xck-retries-left',
     'xck-input',
-    'fake-xck-input',
     'xck-error',
+    // SIM info
+    'sim-info-screen',
+    'sim-info-back',
+    'sim-info-forward',
+    'sim-info-1',
+    'sim-info-2',
+    'sim-number-1',
+    'sim-number-2',
+    'sim-carrier-1',
+    'sim-carrier-2',
     // Import contacts
+    'sim-import',
     'sim-import-button',
     'no-sim',
+    'sd-import-button',
+    'no-memorycard',
     // Wifi
     'networks',
     'wifi-refresh-button',
     'wifi-join-button',
+    'join-hidden-button',
+    // Hidden Wifi
+    'hidden-wifi-authentication',
+    'hidden-wifi-ssid',
+    'hidden-wifi-security',
+    'hidden-wifi-password',
+    'hidden-wifi-identity',
+    'hidden-wifi-identity-box',
+    'hidden-wifi-show-password',
     //Date & Time
     'date-configuration',
     'time-configuration',
@@ -58,9 +81,12 @@ var UIManager = {
     'time-form',
     // 3G
     'data-connection-switch',
+    // Geolocation
+    'geolocation-switch',
     // Tutorial
     'tutorial-screen',
     'tutorial-progress',
+    'tutorial-progress-state',
     'lets-go-button',
     'skip-tutorial-button',
     // Privacy Settings
@@ -86,21 +112,16 @@ var UIManager = {
     this.timeConfigurationLabel.innerHTML = f.localeFormat(currentDate, format);
     this.dateConfigurationLabel.innerHTML = currentDate.
       toLocaleFormat('%Y-%m-%d');
-    // Add events to DOM
-    this.fakePinInput.addEventListener('keypress',
-                                       this.fakeInputValues.bind(this));
-    this.fakePukInput.addEventListener('keypress',
-                                       this.fakeInputValues.bind(this));
-    this.fakeNewpinInput.addEventListener('keypress',
-                                          this.fakeInputValues.bind(this));
-    this.fakeConfirmNewpinInput.addEventListener('keypress',
-                                              this.fakeInputValues.bind(this));
-    this.fakeXckInput.addEventListener('keypress',
-                                       this.fakeInputValues.bind(this));
 
+    // Add events to DOM
     this.simImportButton.addEventListener('click', this);
+    this.sdImportButton.addEventListener('click', this);
     this.skipPinButton.addEventListener('click', this);
+    this.backSimButton.addEventListener('click', this);
     this.unlockSimButton.addEventListener('click', this);
+    this.unlockSimBack.addEventListener('click', this);
+    this.simInfoBack.addEventListener('click', this);
+    this.simInfoForward.addEventListener('click', this);
 
     this.dataConnectionSwitch.addEventListener('click', this);
 
@@ -108,9 +129,27 @@ var UIManager = {
     this.wifiJoinButton.addEventListener('click', this);
     this.networks.addEventListener('click', this);
 
+    this.joinHiddenButton.addEventListener('click', this);
+    this.hiddenWifiSecurity.addEventListener('change', this);
+    this.wifiJoinButton.disabled = true;
+
+    this.hiddenWifiPassword.addEventListener('keyup', function() {
+      this.wifiJoinButton.disabled = !WifiHelper.isValidInput(
+        this.hiddenWifiSecurity.value,
+        this.hiddenWifiPassword.value,
+        this.hiddenWifiIdentity.value
+      );
+    }.bind(this));
+
+    this.hiddenWifiShowPassword.onchange = function togglePasswordVisibility() {
+      UIManager.hiddenWifiPassword.type = this.checked ? 'text' : 'password';
+    };
+
     this.timeConfiguration.addEventListener('input', this);
     this.dateConfiguration.addEventListener('input', this);
     this.initTZ();
+
+    this.geolocationSwitch.addEventListener('click', this);
 
     // Prevent form submit in case something tries to send it
     this.timeForm.addEventListener('submit', function(event) {
@@ -166,13 +205,22 @@ var UIManager = {
         }.bind(this));
 
     this.skipTutorialButton.addEventListener('click', function() {
-      WifiManager.finish();
-      window.close();
+      // For tiny devices
+      if (ScreenLayout.getCurrentLayout() === 'tiny') {
+        WifiManager.finish();
+        window.close();
+      }
+      else {
+        // for large devices
+        Tutorial.jumpToExitStep();
+      }
     });
+
     this.letsGoButton.addEventListener('click', function() {
       UIManager.activationScreen.classList.remove('show');
       UIManager.finishScreen.classList.remove('show');
       UIManager.tutorialScreen.classList.add('show');
+      Tutorial.manageStep();
     });
 
     // Enable sharing performance data (saving to settings)
@@ -185,7 +233,7 @@ var UIManager = {
   sendNewsletter: function ui_sendNewsletter(callback) {
     var self = this;
     var emailValue = self.newsletterInput.value;
-    if (emailValue == '') {
+    if (emailValue === '') {
       return callback(true);
     } else {
       utils.overlay.show(_('email-loading'), 'spinner');
@@ -238,37 +286,35 @@ var UIManager = {
     tzSelect(tzRegion, tzCity, this.setTimeZone, this.setTimeZone);
   },
 
-  fakeInputValues: function ui_fakeInputValues(event) {
-    var fakeInput = event.target;
-    var code = event.charCode;
-    if (code === 0 || (code >= 0x30 && code <= 0x39)) {
-      var displayInput =
-              document.getElementById(fakeInput.id.substr(5, fakeInput.length));
-      var content = displayInput.value;
-      if (code === 0) { // backspace
-        content = content.substr(0, content.length - 1);
-      } else {
-        content += String.fromCharCode(code);
-      }
-      displayInput.value = content;
-    }
-    fakeInput.value = '';
-  },
-
   handleEvent: function ui_handleEvent(event) {
     switch (event.target.id) {
       // SIM
       case 'skip-pin-button':
         SimManager.skip();
         break;
+      case 'back-sim-button':
+      case 'sim-info-back':
+        SimManager.back();
+        break;
       case 'unlock-sim-button':
         Navigation.skipped = false;
         SimManager.unlock();
+        break;
+      case 'unlock-sim-back':
+        SimManager.simUnlockBack();
+        break;
+      case 'sim-info-forward':
+        SimManager.finish();
         break;
       case 'sim-import-button':
         // Needed to give the browser the opportunity to properly refresh the UI
         // Particularly the button toggling cycle (from inactive to active)
         window.setTimeout(SimManager.importContacts, 0);
+        break;
+      case 'sd-import-button':
+        // Needed to give the browser the opportunity to properly refresh the UI
+        // Particularly the button toggling cycle (from inactive to active)
+        window.setTimeout(SdManager.importContacts, 0);
         break;
       // 3G
       case 'data-connection-switch':
@@ -280,7 +326,18 @@ var UIManager = {
         WifiManager.scan(WifiUI.renderNetworks);
         break;
       case 'wifi-join-button':
-        WifiUI.joinNetwork();
+        if (window.location.hash === '#hidden-wifi-authentication') {
+          WifiUI.joinHiddenNetwork();
+        } else {
+          WifiUI.joinNetwork();
+        }
+        break;
+      case 'join-hidden-button':
+        WifiUI.addHiddenNetwork();
+        break;
+      case 'hidden-wifi-security':
+        var securityType = event.target.value;
+        WifiUI.handleHiddenWifiSecurity(securityType);
         break;
       // Date & Time
       case 'time-configuration':
@@ -289,9 +346,13 @@ var UIManager = {
       case 'date-configuration':
         this.setDate();
         break;
+      // Geolocation
+      case 'geolocation-switch':
+        this.updateSetting(event.target.name, event.target.checked);
+        break;
       // Privacy
       case 'share-performance':
-        this.updateSetting(event.target.name, event.target.value);
+        this.updateSetting(event.target.name, event.target.checked);
         break;
       default:
         // wifi selection
@@ -304,8 +365,9 @@ var UIManager = {
 
   updateSetting: function ui_updateSetting(name, value) {
     var settings = window.navigator.mozSettings;
-    if (!name || !settings)
+    if (!name || !settings) {
       return;
+    }
     var cset = {}; cset[name] = value;
     settings.createLock().set(cset);
   },
@@ -326,8 +388,7 @@ var UIManager = {
       return;
     }
 
-    var dateLabel = document.getElementById('this.dateConfigurationLabel');
-     // Current time
+    // Current time
     var now = new Date();
     // Format: 2012-09-01
     var currentDate = this.dateConfiguration.value;

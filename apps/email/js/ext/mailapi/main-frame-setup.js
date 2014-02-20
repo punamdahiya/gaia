@@ -13,34 +13,339 @@
 
 define("mailapi/worker-support/shim-sham", function(){});
 
+define('addressparser/index',['require','exports','module'],function (require, exports, module) {
+
+// expose to the world
+module.exports = parser;
+
+/**
+ * Parses structured e-mail addresses from an address field
+ * 
+ * Example:
+ *
+ *    "Name <address@domain>"
+ *
+ * will be converted to
+ *
+ *     [{name: "Name", address: "address@domain"}]
+ *
+ * @param {String} str Address field
+ * @return {Array} An array of address objects
+ */
+function parser(str){
+    var tokenizer = new Tokenizer(str),
+        tokens = tokenizer.tokenize();
+
+
+    var addresses = [],
+        address = [],
+        parsedAddresses = [];
+
+    tokens.forEach(function(token){
+        if(token.type == "operator" && (token.value =="," || token.value ==";")){
+            addresses.push(address);
+            address = [];
+        }else{
+            address.push(token);
+        }
+    });
+
+    if(address.length){
+        addresses.push(address);
+    }
+
+    addresses.forEach(function(address){
+        address = handleAddress(address);
+        if(address.length){
+            parsedAddresses = parsedAddresses.concat(address);
+        }
+    });
+
+    return parsedAddresses;
+}
+
+/**
+ * Converts tokens for a single address into an address object
+ *
+ * @param {Array} tokens Tokens object
+ * @return {Object} Address object
+ */
+function handleAddress(tokens){
+    var token,
+        isGroup = false,
+        state = "text",
+        address,
+        addresses = [],
+        data = {
+            address: [],
+            comment: [],
+            group: [],
+            text: []
+        },
+        i, len;
+
+    // Filter out <addresses>, (comments) and regular text
+    for(i=0, len = tokens.length; i<len; i++){
+        token = tokens[i];
+        
+        if(token.type == "operator"){
+            switch(token.value){
+                case "<":
+                    state = "address";
+                    break;
+                case "(":
+                    state = "comment";
+                    break;
+                case ":":
+                    state = "group";
+                    isGroup = true;
+                    break;
+                default:
+                    state = "text";
+            }
+        }else{
+            if(token.value){
+                data[state].push(token.value);
+            }
+        }
+    }
+
+    // If there is no text but a comment, replace the two
+    if(!data.text.length && data.comment.length){
+        data.text = data.comment;
+        data.comment = [];
+    }
+
+    if(data.group.length){
+        
+        if(data.text.length){
+            data.text = data.text.join(" ");
+        }
+
+        addresses = addresses.concat(parser(data.group.join(",")).map(function(address){
+            address.name = data.text || address.name;
+            return address;
+        }));
+
+    }else{
+        // If no address was found, try to detect one from regular text
+        if(!data.address.length && data.text.length){
+            for(i = data.text.length - 1; i>=0; i--){
+                if(data.text[i].match(/^[^@\s]+@[^@\s]+$/)){
+                    data.address = data.text.splice(i,1);
+                    break;
+                }
+            }
+
+            // still no address
+            if(!data.address.length){
+                for(i = data.text.length - 1; i>=0; i--){
+                    data.text[i] = data.text[i].replace(/\s*\b[^@\s]+@[^@\s]+\b\s*/, function(address){
+                        if(!data.address.length){
+                            data.address = [address.trim()];
+                            return " ";
+                        }else{
+                            return address;
+                        }
+                    }).trim();
+                    if(data.address.length){
+                        break;
+                    }
+                }                
+            }
+        }
+
+        // If there's still is no text but a comment exixts, replace the two
+        if(!data.text.length && data.comment.length){
+            data.text = data.comment;
+            data.comment = [];
+        }  
+
+        // Keep only the first address occurence, push others to regular text
+        if(data.address.length > 1){
+            data.text = data.text.concat(data.address.splice(1));
+        }
+
+        // Join values with spaces
+        data.text = data.text.join(" ");
+        data.address = data.address.join(" ");
+
+        if(!data.address && isGroup){
+            return [];
+        }else{
+            address = {
+                address: data.address || data.text || "",
+                name: data.text || data.address || ""
+            };
+
+            if(address.address == address.name){
+                if((address.address || "").match(/@/)){
+                    address.name = "";
+                }else{
+                    address.address = "";
+                }
+                
+            }
+
+            addresses.push(address);
+        }
+    }
+
+    return addresses;
+}
+
+
+/**
+ * Creates a TOkenizer object for tokenizing address field strings
+ *
+ * @constructor
+ * @param {String} str Address field string
+ */
+function Tokenizer(str){
+
+    this.str = (str || "").toString();
+    this.operatorCurrent = "";
+    this.operatorExpecting = "";
+    this.node = null;
+    this.escaped = false;
+
+    this.list = [];
+
+}
+
+/**
+ * Operator tokens and which tokens are expected to end the sequence
+ */
+Tokenizer.prototype.operators = {
+    "\"": "\"",
+    "(": ")",
+    "<": ">",
+    ",": "",
+    ":": ";"
+};
+
+/**
+ * Tokenizes the original input string
+ *
+ * @return {Array} An array of operator|text tokens
+ */
+Tokenizer.prototype.tokenize = function(){
+    var chr, list = [];
+    for(var i=0, len = this.str.length; i<len; i++){
+        chr = this.str.charAt(i);
+        this.checkChar(chr);
+    }
+
+    this.list.forEach(function(node){
+        node.value = (node.value || "").toString().trim();
+        if(node.value){
+            list.push(node);
+        }
+    });
+
+    return list;
+};
+
+/**
+ * Checks if a character is an operator or text and acts accordingly
+ *
+ * @param {String} chr Character from the address field
+ */
+Tokenizer.prototype.checkChar = function(chr){
+    if((chr in this.operators || chr == "\\") && this.escaped){
+        this.escaped = false;
+    }else if(this.operatorExpecting && chr == this.operatorExpecting){
+        this.node = {
+            type: "operator",
+            value: chr
+        };
+        this.list.push(this.node);
+        this.node = null;
+        this.operatorExpecting = "";
+        this.escaped = false;
+        return;
+    }else if(!this.operatorExpecting && chr in this.operators){
+        this.node = {
+            type: "operator",
+            value: chr
+        };
+        this.list.push(this.node);
+        this.node = null;
+        this.operatorExpecting = this.operators[chr];
+        this.escaped = false;
+        return;
+    }
+
+    if(!this.escaped && chr == "\\"){
+        this.escaped = true;
+        return;
+    }
+
+    if(!this.node){
+        this.node = {
+            type: "text",
+            value: ""
+        };
+        this.list.push(this.node);
+    }
+
+    if(this.escaped && chr != "\\"){
+        this.node.value += "\\";
+    }
+
+    this.node.value += chr;
+    this.escaped = false;
+};
+
+});
+define('addressparser',['./addressparser/index'], function (main) {
+    return main;
+});
 /**
  *
  **/
 
 define('mailapi/mailapi',
   [
-    'exports'
+    'exports',
+    'addressparser'
   ],
   function(
-    exports
+    exports,
+    addressparser
   ) {
 
-/**
- * Helper function to check account flag fast path in a cookie
- */
-function hasAccountCookie() {
-  return (document.cookie || '').indexOf('mailHasAccounts') !== -1;
+function objCopy(obj) {
+  var copy = {};
+  Object.keys(obj).forEach(function (key) {
+    copy[key] = obj[key];
+  });
+  return copy;
 }
+
+/**
+ * The number of header wire messages to cache in the recvCache
+ */
+var HEADER_CACHE_LIMIT = 8;
 
 /**
  *
  */
-function MailAccount(api, wireRep) {
+function MailAccount(api, wireRep, acctsSlice) {
   this._api = api;
   this.id = wireRep.id;
+
+  // Hold on to wireRep for caching
+  this._wireRep = wireRep;
+
+  // Hold on to acctsSlice for use in determining default account.
+  this.acctsSlice = acctsSlice;
+
   this.type = wireRep.type;
   this.name = wireRep.name;
   this.syncRange = wireRep.syncRange;
+  this.syncInterval = wireRep.syncInterval;
+  this.notifyOnNew = wireRep.notifyOnNew;
 
   /**
    * Is the account currently enabled, as in will we talk to the server?
@@ -57,6 +362,9 @@ function MailAccount(api, wireRep) {
    *   @case['bad-user-or-pass']
    *   @case['needs-app-pass']
    *   @case['imap-disabled']
+   *   @case['pop-server-not-great']{
+   *     The POP3 server doesn't support IDLE and TOP, so we can't use it.
+   *   }
    *   @case['connection']{
    *     Generic connection problem; this problem can quite possibly be present
    *     in conjunction with more specific problems such as a bad username /
@@ -98,14 +406,21 @@ MailAccount.prototype = {
   __update: function(wireRep) {
     this.enabled = wireRep.enabled;
     this.problems = wireRep.problems;
+    this.syncInterval = wireRep.syncInterval;
+    this.notifyOnNew = wireRep.notifyOnNew;
+    this._wireRep.defaultPriority = wireRep.defaultPriority;
+  },
+
+  __die: function() {
+    // currently, nothing to clean up
   },
 
   /**
    * Tell the back-end to clear the list of problems with the account, re-enable
    * it, and try and connect.
    */
-  clearProblems: function() {
-    this._api._clearAccountProblems(this);
+  clearProblems: function(callback) {
+    this._api._clearAccountProblems(this, callback);
   },
 
   /**
@@ -113,7 +428,11 @@ MailAccount.prototype = {
    *   @param[mods @dict[
    *     @key[password String]
    *   ]]
-   * ]
+   * ]{
+   *   In addition to regular account property settings,
+   *   "setAsDefault": true can be passed to set this
+   *   account as the default acccount.
+   * }
    */
   modifyAccount: function(mods) {
     this._api._modifyAccount(this, mods);
@@ -126,6 +445,17 @@ MailAccount.prototype = {
    */
   deleteAccount: function() {
     this._api._deleteAccount(this);
+  },
+
+  /**
+   * Returns true if this account is the default account, by looking at
+   * all accounts in the acctsSlice.
+   */
+  get isDefault() {
+    if (!this.acctsSlice)
+      throw new Error('No account slice available');
+
+    return this.acctsSlice.defaultAccount === this;
   },
 };
 
@@ -145,7 +475,7 @@ function MailSenderIdentity(api, wireRep) {
   this._api = api;
   this.id = wireRep.id;
 
-  this.name = wireRep.displayName;
+  this.name = wireRep.name;
   this.address = wireRep.address;
   this.replyTo = wireRep.replyTo;
   this.signature = wireRep.signature;
@@ -157,11 +487,18 @@ MailSenderIdentity.prototype = {
   toJSON: function() {
     return { type: 'MailSenderIdentity' };
   },
+
+  __die: function() {
+    // nothing to clean up currently
+  },
 };
 
 function MailFolder(api, wireRep) {
   this._api = api;
   this.id = wireRep.id;
+
+  // Hold on to wireRep for caching
+  this._wireRep = wireRep;
 
   /**
    * The human-readable name of the folder.  (As opposed to its path or the
@@ -228,7 +565,7 @@ MailFolder.prototype = {
   },
   toJSON: function() {
     return {
-      type: 'MailFolder',
+      type: this.type,
       path: this.path
     };
   },
@@ -237,6 +574,10 @@ MailFolder.prototype = {
     this.lastSyncedAt = wireRep.lastSyncedAt ? new Date(wireRep.lastSyncedAt)
                                              : null;
   },
+
+  __die: function() {
+    // currently nothing to clean up
+  }
 };
 
 function filterOutBuiltinFlags(flags) {
@@ -267,6 +608,477 @@ function serializeMessageName(x) {
 }
 
 /**
+ * Caches contact lookups, both hits and misses, as well as updating the
+ * MailPeep instances returned by resolve calls.
+ *
+ * We maintain strong maps from both contact id and e-mail address to MailPeep
+ * instances.  We hold a strong reference because BridgedViewSlices already
+ * require explicit lifecycle maintenance (aka call die() when done with them).
+ * We need the contact id and e-mail address because when a contact is changed,
+ * an e-mail address may be changed, and we don't get to see the old
+ * representation.  So if the e-mail address was deleted, we need the contact id
+ * mapping.  And if the e-mail address was added, we need the e-mail address
+ * mapping.
+ *
+ * If the mozContacts API is not available, we just create inert MailPeep
+ * instances that do not get tracked or updated.
+ *
+ * Domain notes:
+ *
+ * The contacts API does not enforce any constraints on the number of contacts
+ * who can use an e-mail address, but the e-mail app only allows one contact
+ * to correspond to an e-mail address at a time.
+ */
+var ContactCache = exports.ContactCache = {
+  /**
+   * Maps e-mail addresses to the mozContact rep for the object, or null if
+   * there was a miss.
+   *
+   * We explicitly do not want to choose an arbitrary MailPeep instance to
+   * (re)use because it could lead to GC memory leaks if data/element/an expando
+   * were set on the MailPeep and we did not zero it out when the owning slice
+   * was destroyed.  We could, however, use the live set of peeps as a fallback
+   * if we don't have a contact cached.
+   */
+  _contactCache: Object.create(null),
+  /** The number of entries in the cache. */
+  _cacheHitEntries: 0,
+  /** The number of stored misses in the cache. */
+  _cacheEmptyEntries: 0,
+
+  /**
+   * Maximum number of hit entries in the cache before we should clear the
+   * cache.
+   */
+  MAX_CACHE_HITS: 256,
+  /** Maximum number of empty entries to store in the cache before clearing. */
+  MAX_CACHE_EMPTY: 1024,
+
+  /** Maps contact id to lists of MailPeep instances. */
+  _livePeepsById: Object.create(null),
+  /** Maps e-mail addresses to lists of MailPeep instances */
+  _livePeepsByEmail: Object.create(null),
+
+  pendingLookupCount: 0,
+
+  callbacks: [],
+
+  init: function() {
+    var contactsAPI = navigator.mozContacts;
+    if (!contactsAPI)
+      return;
+
+    contactsAPI.oncontactchange = this._onContactChange.bind(this);
+  },
+
+  _resetCache: function() {
+    this._contactCache = Object.create(null);
+    this._cacheHitEntries = 0;
+    this._cacheEmptyEntries = 0;
+  },
+
+  shutdown: function() {
+    var contactsAPI = navigator.mozContacts;
+    if (!contactsAPI)
+      return;
+    contactsAPI.oncontactchange = null;
+  },
+
+  /**
+   * Currently we process the updates in real-time as we get them.  There's an
+   * inherent trade-off between chewing CPU when we're in the background and
+   * minimizing latency when we are displayed.  We're biased towards minimizing
+   * latency right now.
+   *
+   * All contact changes flush our contact cache rather than try and be fancy.
+   * We are already fancy with the set of live peeps and our lookups could just
+   * leverage that.  (The contact cache is just intended as a steady-state
+   * high-throughput thing like when displaying messages in the UI.  We don't
+   * expect a lot of contact changes to happen during that time.)
+   *
+   * For info on the events/triggers, see:
+   * https://developer.mozilla.org/en-US/docs/DOM/ContactManager.oncontactchange
+   */
+  _onContactChange: function(event) {
+    var contactsAPI = navigator.mozContacts;
+    var livePeepsById = this._livePeepsById,
+        livePeepsByEmail = this._livePeepsByEmail;
+
+    // clear the cache if it has anything in it (per the above doc block)
+    if (this._cacheHitEntries || this._cacheEmptyEntries)
+      this._resetCache();
+
+    // -- Contact removed OR all contacts removed!
+    if (event.reason === 'remove') {
+      function cleanOutPeeps(livePeeps) {
+        for (var iPeep = 0; iPeep < livePeeps.length; iPeep++) {
+          var peep = livePeeps[iPeep];
+          peep.contactId = null;
+          if (peep.onchange) {
+            try {
+              peep.onchange(peep);
+            }
+            catch (ex) {
+              reportClientCodeError('peep.onchange error', ex, '\n',
+                                    ex.stack);
+            }
+          }
+        }
+      }
+
+      // - all contacts removed! (clear() called)
+      var livePeeps;
+      if (!event.contactID) {
+        for (var contactId in livePeepsById) {
+          livePeeps = livePeepsById[contactId];
+          cleanOutPeeps(livePeeps);
+          this._livePeepsById = Object.create(null);
+        }
+      }
+      // - just one contact removed
+      else {
+        livePeeps = livePeepsById[event.contactID];
+        if (livePeeps) {
+          cleanOutPeeps(livePeeps);
+          delete livePeepsById[event.contactID];
+        }
+      }
+    }
+    // -- Created or updated; we need to fetch the contact to investigate
+    else {
+      var req = contactsAPI.find({
+        filterBy: ['id'],
+        filterOp: 'equals',
+        filterValue: event.contactID
+      });
+      req.onsuccess = function() {
+        // If the contact disappeared we will hear a 'remove' event and so don't
+        // need to process this.
+        if (!req.result.length)
+          return;
+        var contact = req.result[0], livePeeps, iPeep, peep;
+
+        // - process update with apparent e-mail address removal
+        if (event.reason === 'update') {
+          livePeeps = livePeepsById[contact.id];
+          if (livePeeps) {
+            var contactEmails = contact.email ?
+                  contact.email.map(function(e) { return e.value; }) :
+                [];
+            for (iPeep = 0; iPeep < livePeeps.length; iPeep++) {
+              peep = livePeeps[iPeep];
+              if (contactEmails.indexOf(peep.address) === -1) {
+                // Need to fix-up iPeep because of the splice; reverse iteration
+                // reorders our notifications and we don't want that, hence
+                // this.
+                livePeeps.splice(iPeep--, 1);
+                peep.contactId = null;
+                if (peep.onchange) {
+                  try {
+                    peep.onchange(peep);
+                  }
+                  catch (ex) {
+                    reportClientCodeError('peep.onchange error', ex, '\n',
+                                          ex.stack);
+                  }
+                }
+              }
+            }
+            if (livePeeps.length === 0)
+              delete livePeepsById[contact.id];
+          }
+        }
+        // - process create/update causing new coverage
+        if (!contact.email)
+          return;
+        for (var iEmail = 0; iEmail < contact.email.length; iEmail++) {
+          var email = contact.email[iEmail].value;
+          livePeeps = livePeepsByEmail[email];
+          // nothing to do if there are no peeps that use that email address
+          if (!livePeeps)
+            continue;
+
+          for (iPeep = 0; iPeep < livePeeps.length; iPeep++) {
+            peep = livePeeps[iPeep];
+            // If the peep is not yet associated with this contact or any other
+            // contact, then associate it.
+            if (!peep.contactId) {
+              peep.contactId = contact.id;
+              var idLivePeeps = livePeepsById[peep.contactId];
+              if (idLivePeeps === undefined)
+                idLivePeeps = livePeepsById[peep.contactId] = [];
+              idLivePeeps.push(peep);
+            }
+            // However, if it's associated with a different contact, then just
+            // skip the peep.
+            else if (peep.contactId !== contact.id) {
+              continue;
+            }
+            // (The peep must be associated with this contact, so update and
+            // fire)
+
+            if (contact.name && contact.name.length)
+              peep.name = contact.name[0];
+            if (peep.onchange) {
+              try {
+                peep.onchange(peep);
+              }
+              catch (ex) {
+                reportClientCodeError('peep.onchange error', ex, '\n',
+                                      ex.stack);
+              }
+            }
+          }
+        }
+      };
+      // We don't need to do anything about onerror; the 'remove' event will
+      // probably have fired in this case, making us correct.
+    }
+  },
+
+  resolvePeeps: function(addressPairs) {
+    if (addressPairs == null)
+      return null;
+    var resolved = [];
+    for (var i = 0; i < addressPairs.length; i++) {
+      resolved.push(this.resolvePeep(addressPairs[i]));
+    }
+    return resolved;
+  },
+  /**
+   * Create a MailPeep instance with the best information available and return
+   * it.  Information from the (moz)Contacts API always trumps the passed-in
+   * information.  If we have a cache hit (which covers both positive and
+   * negative evidence), we are done/all resolved immediately.  Otherwise, we
+   * need to issue an async request.  In that case, you want to check
+   * ContactCache.pendingLookupCount and push yourself onto
+   * ContactCache.callbacks if you want to be notified when the current set of
+   * lookups gets resolved.
+   *
+   * This is a slightly odd API, but it's based on the knowledge that for a
+   * single e-mail we will potentially need to perform multiple lookups and that
+   * e-mail addresses are also likely to come in batches so there's no need to
+   * generate N callbacks when 1 will do.
+   */
+  resolvePeep: function(addressPair) {
+    var emailAddress = addressPair.address;
+    var entry = this._contactCache[emailAddress], contact, peep;
+    var contactsAPI = navigator.mozContacts;
+    // known miss; create miss peep
+    // no contacts API, always a miss, skip out before extra logic happens
+    if (entry === null || !contactsAPI) {
+      peep = new MailPeep(addressPair.name || '', emailAddress, null, null);
+      if (!contactsAPI)
+        return peep;
+    }
+    // known contact; unpack contact info
+    else if (entry !== undefined) {
+      var name = addressPair.name || '';
+      if (entry.name && entry.name.length)
+        name = entry.name[0];
+      peep = new MailPeep(
+        name,
+        emailAddress,
+        entry.id,
+        (entry.photo && entry.photo.length) ? entry.photo[0] : null);
+    }
+    // not yet looked-up; assume it's a miss and we'll fix-up if it's a hit
+    else {
+      peep = new MailPeep(addressPair.name || '',
+                          emailAddress, null, null);
+
+      // Place a speculative miss in the contact cache so that additional
+      // requests take that path.  They will get fixed up when our lookup
+      // returns (or if a change event happens to come in before our lookup
+      // returns.)  Note that we do not do any hit/miss counting right now; we
+      // wait for the result to come back.
+      this._contactCache[emailAddress] = null;
+
+      this.pendingLookupCount++;
+      var req = contactsAPI.find({
+                  filterBy: ['email'],
+                  filterOp: 'equals',
+                  filterValue: emailAddress
+                });
+      var self = this, handleResult = function() {
+        if (req.result && req.result.length) {
+          var contact = req.result[0];
+
+          ContactCache._contactCache[emailAddress] = contact;
+          if (++ContactCache._cacheHitEntries > ContactCache.MAX_CACHE_HITS)
+            self._resetCache();
+
+          var peepsToFixup = self._livePeepsByEmail[emailAddress];
+          // there might no longer be any MailPeeps alive to care; leave
+          if (!peepsToFixup)
+            return;
+          for (var i = 0; i < peepsToFixup.length; i++) {
+            var peep = peepsToFixup[i];
+            if (!peep.contactId) {
+              peep.contactId = contact.id;
+              var livePeeps = self._livePeepsById[peep.contactId];
+              if (livePeeps === undefined)
+                livePeeps = self._livePeepsById[peep.contactId] = [];
+              livePeeps.push(peep);
+            }
+
+            if (contact.name && contact.name.length)
+              peep.name = contact.name[0];
+            if (contact.photo && contact.photo.length)
+              peep._thumbnailBlob = contact.photo[0];
+
+            // If no one is waiting for our/any request to complete, generate an
+            // onchange notification.
+            if (!self.callbacks.length) {
+              if (peep.onchange) {
+                try {
+                  peep.onchange(peep);
+                }
+                catch (ex) {
+                  reportClientCodeError('peep.onchange error', ex, '\n',
+                                        ex.stack);
+                }
+              }
+            }
+          }
+        }
+        else {
+          ContactCache._contactCache[emailAddress] = null;
+          if (++ContactCache._cacheEmptyEntries > ContactCache.MAX_CACHE_EMPTY)
+            self._resetCache();
+        }
+        // Only notify callbacks if all outstanding lookups have completed
+        if (--self.pendingLookupCount === 0) {
+          for (i = 0; i < ContactCache.callbacks.length; i++) {
+            ContactCache.callbacks[i]();
+          }
+          ContactCache.callbacks.splice(0, ContactCache.callbacks.length);
+        }
+      };
+      req.onsuccess = handleResult;
+      req.onerror = handleResult;
+    }
+
+    // - track the peep in our lists of live peeps
+    var livePeeps;
+    livePeeps = this._livePeepsByEmail[emailAddress];
+    if (livePeeps === undefined)
+      livePeeps = this._livePeepsByEmail[emailAddress] = [];
+    livePeeps.push(peep);
+
+    if (peep.contactId) {
+      livePeeps = this._livePeepsById[peep.contactId];
+      if (livePeeps === undefined)
+        livePeeps = this._livePeepsById[peep.contactId] = [];
+      livePeeps.push(peep);
+    }
+
+    return peep;
+  },
+
+  forgetPeepInstances: function() {
+    var livePeepsById = this._livePeepsById,
+        livePeepsByEmail = this._livePeepsByEmail;
+    for (var iArg = 0; iArg < arguments.length; iArg++) {
+      var peeps = arguments[iArg];
+      if (!peeps)
+        continue;
+      for (var iPeep = 0; iPeep < peeps.length; iPeep++) {
+        var peep = peeps[iPeep], livePeeps, idx;
+        if (peep.contactId) {
+          livePeeps = livePeepsById[peep.contactId];
+          if (livePeeps) {
+            idx = livePeeps.indexOf(peep);
+            if (idx !== -1) {
+              livePeeps.splice(idx, 1);
+              if (livePeeps.length === 0)
+                delete livePeepsById[peep.contactId];
+            }
+          }
+        }
+        livePeeps = livePeepsByEmail[peep.address];
+        if (livePeeps) {
+          idx = livePeeps.indexOf(peep);
+          if (idx !== -1) {
+            livePeeps.splice(idx, 1);
+            if (livePeeps.length === 0)
+              delete livePeepsByEmail[peep.address];
+          }
+        }
+      }
+    }
+  },
+};
+
+function revokeImageSrc() {
+  // see showBlobInImg below for the rationale for useWin.
+  var useWin = this.ownerDocument.defaultView || window;
+  useWin.URL.revokeObjectURL(this.src);
+}
+function showBlobInImg(imgNode, blob) {
+  // We need to look at the image node because object URLs are scoped per
+  // document, and for HTML e-mails, we use an iframe that lives in a different
+  // document than us.
+  //
+  // the "|| window" is for our shimmed testing environment and should not
+  // happen in production.
+  var useWin = imgNode.ownerDocument.defaultView || window;
+  imgNode.src = useWin.URL.createObjectURL(blob);
+  // We can revoke the URL after we are 100% sure the image has resolved the URL
+  // to get at the underlying blob.  Once autorevoke URLs are supported, we can
+  // stop doing this.
+  imgNode.addEventListener('load', revokeImageSrc);
+}
+
+function MailPeep(name, address, contactId, thumbnailBlob) {
+  this.name = name;
+  this.address = address;
+  this.contactId = contactId;
+  this._thumbnailBlob = thumbnailBlob;
+
+  this.element = null;
+  this.data = null;
+  // peeps are usually one of: from, to, cc, bcc
+  this.type = null;
+
+  this.onchange = null;
+}
+MailPeep.prototype = {
+  get isContact() {
+    return this.contactId !== null;
+  },
+
+  toString: function() {
+    return '[MailPeep: ' + this.address + ']';
+  },
+  toJSON: function() {
+    return {
+      name: this.name,
+      address: this.address,
+      contactId: this.contactId
+    };
+  },
+  toWireRep: function() {
+    return {
+      name: this.name,
+      address: this.address
+    };
+  },
+
+  get hasPicture() {
+    return this._thumbnailBlob !== null;
+  },
+  /**
+   * Display the contact's thumbnail on the given image node, abstracting away
+   * the issue of Blob URL life-cycle management.
+   */
+  displayPictureInImageTag: function(imgNode) {
+    if (this._thumbnailBlob)
+      showBlobInImg(imgNode, this._thumbnailBlob);
+  },
+};
+
+/**
  * Email overview information for displaying the message in the list as planned
  * for the current UI.  Things that we don't need (ex: to/cc/bcc) for the list
  * end up on the body, currently.  They will probably migrate to the header in
@@ -278,17 +1090,20 @@ function serializeMessageName(x) {
  */
 function MailHeader(slice, wireRep) {
   this._slice = slice;
+
+  // Store the wireRep so it can be used for caching.
+  this._wireRep = wireRep;
+
   this.id = wireRep.suid;
   this.guid = wireRep.guid;
 
-  this.author = wireRep.author;
+  this.author = ContactCache.resolvePeep(wireRep.author);
+  this.to = ContactCache.resolvePeeps(wireRep.to);
+  this.cc = ContactCache.resolvePeeps(wireRep.cc);
+  this.bcc = ContactCache.resolvePeeps(wireRep.bcc);
+  this.replyTo = wireRep.replyTo;
 
   this.date = new Date(wireRep.date);
-
-  this.to = wireRep.to;
-  this.cc = wireRep.cc;
-  this.bcc = wireRep.bcc;
-  this.replyTo = wireRep.replyTo;
 
   this.__update(wireRep);
   this.hasAttachments = wireRep.hasAttachments;
@@ -314,9 +1129,32 @@ MailHeader.prototype = {
     };
   },
 
+  /**
+   * The use-case is the message list providing the message reader with a
+   * header.  The header really wants to get update notifications from the
+   * backend and therefore not be inert, but that's a little complicated and out
+   * of scope for the current bug.
+   *
+   * We clone at all because our MailPeep.onchange and MailPeep.element values
+   * were getting clobbered.  All the instances are currently intended to map
+   * 1:1 to a single UI widget, so cloning seems like the right thing to do.
+   *
+   * A deeper issue is whether the message reader will want to have its own
+   * slice since the reader will soon allow forward/backward navigation.  I
+   * assume we'll want the message list to track that movement, which suggests
+   * that it really doesn't want to do that.  This suggests we'll either want
+   * non-inert clones or to just use a list-of-handlers model with us using
+   * closures and being careful about removing event handlers.
+   */
+  makeCopy: function() {
+    return new MailHeader(this._slice, this._wireRep);
+  },
+
   __update: function(wireRep) {
-    if (wireRep.snippet !== null)
+    this._wireRep = wireRep;
+    if (wireRep.snippet !== null) {
       this.snippet = wireRep.snippet;
+    }
 
     this.isRead = wireRep.flags.indexOf('\\Seen') !== -1;
     this.isStarred = wireRep.flags.indexOf('\\Flagged') !== -1;
@@ -324,6 +1162,14 @@ MailHeader.prototype = {
     this.isForwarded = wireRep.flags.indexOf('$Forwarded') !== -1;
     this.isJunk = wireRep.flags.indexOf('$Junk') !== -1;
     this.tags = filterOutBuiltinFlags(wireRep.flags);
+  },
+
+  /**
+   * Release subscriptions associated with the header; currently this just means
+   * tell the ContactCache we no longer care about the `MailPeep` instances.
+   */
+  __die: function() {
+    ContactCache.forgetPeepInstances([this.author], this.to, this.cc, this.bcc);
   },
 
   /**
@@ -371,8 +1217,28 @@ MailHeader.prototype = {
   },
 
   /**
-   * Request the `MailBody` instance for this message, passing it to the
-   * provided callback function once retrieved.
+   * Request the `MailBody` instance for this message, passing it to
+   * the provided callback function once retrieved. If you request the
+   * bodyReps as part of this call, the backend guarantees that it
+   * will only call the "onchange" notification when the body has
+   * actually changed. In other words, if you end up calling getBody()
+   * multiple times for some reason, the backend will be smart about
+   * only fetching the bodyReps the first time and generating change
+   * notifications as one would expect.
+   *
+   * @args[
+   *   @param[options @dict[
+   *     @key[downloadBodyReps #:default false]{
+   *       Asynchronously initiate download of the body reps.  The body may
+   *       be returned before the body parts are downloaded, but they will
+   *       eventually show up.  Use the 'onchange' event to hear as the body
+   *       parts get added.
+   *     }
+   *     @key[withBodyReps #:default false]{
+   *       Don't return until the body parts are fully downloaded.
+   *     }
+   *   ]]
+   * ]
    */
   getBody: function(options, callback) {
     if (typeof(options) === 'function') {
@@ -380,6 +1246,19 @@ MailHeader.prototype = {
       options = null;
     }
     this._slice._api._getBodyForMessage(this, options, callback);
+  },
+
+  /**
+   * Returns the number of bytes needed before we can display the full
+   * body. If this value is large, we should warn the user that they
+   * may be downloading a large amount of data. For IMAP, this value
+   * is the amount of data we need to render bodyReps and
+   * relatedParts; for POP3, we need the whole message.
+   */
+  get bytesToDownloadForBodyDisplay() {
+    // If this is unset (old message), default to zero so that we just
+    // won't show any warnings (rather than prompting incorrectly).
+    return this._wireRep.bytesToDownloadForBodyDisplay || 0;
   },
 
   /**
@@ -392,7 +1271,9 @@ MailHeader.prototype = {
    * move may be performed instead.)
    */
   editAsDraft: function(callback) {
-    return this._slice._api.resumeMessageComposition(this, callback);
+    var composer = this._slice._api.resumeMessageComposition(this, callback);
+    composer.hasDraft = true;
+    return composer;
   },
 
   /**
@@ -464,6 +1345,10 @@ MailMatchedHeader.prototype = {
       id: this.header.id
     };
   },
+
+  __die: function() {
+    this.header.__die();
+  },
 };
 
 /**
@@ -490,7 +1375,8 @@ function MailBody(api, suid, wireRep, handle) {
   }
   this._relatedParts = wireRep.relatedParts;
   this.bodyReps = wireRep.bodyReps;
-  this._cleanup = null;
+  // references is included for debug/unit testing purposes, hence is private
+  this._references = wireRep.references;
 
   this.onchange = null;
   this.ondead = null;
@@ -504,6 +1390,41 @@ MailBody.prototype = {
       type: 'MailBody',
       id: this.id
     };
+  },
+
+  __update: function(wireRep, detail) {
+    // Related parts and bodyReps have no state we need to maintain.  Just
+    // replace them with the new copies for simplicity.
+    this._relatedParts = wireRep.relatedParts;
+    this.bodyReps = wireRep.bodyReps;
+
+    // detaching an attachment is special since we need to splice the attachment
+    // out.
+    if (detail && detail.changeDetails &&
+        detail.changeDetails.detachedAttachments) {
+      var indices = detail.changeDetails.detachedAttachments;
+      for (var iSplice = 0; iSplice < indices.length; iSplice++) {
+        this.attachments.splice(indices[iSplice], 1);
+      }
+    }
+
+    // Attachment instances need to be updated rather than replaced.
+    if (wireRep.attachments) {
+      var i, attachment;
+      for (i = 0; i < this.attachments.length; i++) {
+        attachment = this.attachments[i];
+        attachment.__update(wireRep.attachments[i]);
+      }
+      // If we added new attachments, construct them now.
+      for (i = this.attachments.length; i < wireRep.attachments.length; i++) {
+        this.attachments.push(
+          new MailAttachment(this, wireRep.attachments[i]));
+      }
+      // We don't handle the fictional case where wireRep.attachments
+      // decreases in size, because that doesn't currently happen and
+      // probably won't ever, apart from detachedAttachments above
+      // which are a different thing.
+    }
   },
 
   /**
@@ -566,26 +1487,19 @@ MailBody.prototype = {
 
   /**
    * Synchronously trigger the display of embedded images.
+   *
+   * The loadCallback allows iframe resizing logic to fire once the size of the
+   * image is known since Gecko still doesn't have seamless iframes.
    */
   showEmbeddedImages: function(htmlNode, loadCallback) {
-    var i, cidToObjectUrl = {},
-        // the "|| window" is for our shimmed testing environment and should
-        // not happen in production.
-        useWin = htmlNode.ownerDocument.defaultView || window;
+    var i, cidToBlob = {};
     // - Generate object URLs for the attachments
     for (i = 0; i < this._relatedParts.length; i++) {
       var relPart = this._relatedParts[i];
       // Related parts should all be stored as Blobs-in-IndexedDB
-      if (relPart.file && !Array.isArray(relPart.file)) {
-        cidToObjectUrl[relPart.contentId] = useWin.URL.createObjectURL(
-          relPart.file);
-      }
+      if (relPart.file && !Array.isArray(relPart.file))
+        cidToBlob[relPart.contentId] = relPart.file;
     }
-    this._cleanup = function revokeURLs() {
-      for (var cid in cidToObjectUrl) {
-        useWin.URL.revokeObjectURL(cidToObjectUrl[cid]);
-      }
-    };
 
     // - Transform the links
     var nodes = htmlNode.querySelectorAll('.moz-embedded-image');
@@ -593,14 +1507,11 @@ MailBody.prototype = {
       var node = nodes[i],
           cid = node.getAttribute('cid-src');
 
-      if (!cidToObjectUrl.hasOwnProperty(cid))
+      if (!cidToBlob.hasOwnProperty(cid))
         continue;
-      // XXX according to an MDN tutorial we can use onload to destroy the
-      // URL once the image has been loaded.
-      if (loadCallback) {
+      showBlobInImg(node, cidToBlob[cid]);
+      if (loadCallback)
         node.addEventListener('load', loadCallback, false);
-      }
-      node.src = cidToObjectUrl[cid];
 
       node.removeAttribute('cid-src');
       node.classList.remove('moz-embedded-image');
@@ -641,15 +1552,9 @@ MailBody.prototype = {
     }
   },
   /**
-   * Call this method when you are done with a message body.  This is required
-   * so that any File/Blob URL's can be revoked.
+   * Call this method when you are done with a message body.
    */
   die: function() {
-    if (this._cleanup) {
-      this._cleanup();
-      this._cleanup = null;
-    }
-
     // Remember to cleanup event listeners except ondead!
     this.onchange = null;
 
@@ -689,11 +1594,31 @@ MailAttachment.prototype = {
     };
   },
 
+  __update: function(wireRep) {
+    this.mimetype = wireRep.type;
+    this.sizeEstimateInBytes = wireRep.sizeEstimate;
+    this._file = wireRep.file;
+  },
+
   get isDownloaded() {
     return !!this._file;
   },
 
+  /**
+   * Is this attachment something we can download?  In almost all cases, the
+   * answer is yes, regardless of network state.  The exception is that sent
+   * POP3 messages do not retain their attachment Blobs and there is no way to
+   * download them after the fact.
+   */
+  get isDownloadable() {
+    return this.mimetype !== 'application/x-gelam-no-download';
+  },
+
   download: function(callWhenDone, callOnProgress) {
+    if (this.isDownloaded) {
+      callWhenDone();
+      return;
+    }
     this._body._api._downloadAttachments(
       this._body, [], [this._body.attachments.indexOf(this)],
       callWhenDone, callOnProgress);
@@ -943,8 +1868,33 @@ BridgedViewSlice.prototype = {
         type: 'killSlice',
         handle: this._handle
       });
+
+    for (var i = 0; i < this.items.length; i++) {
+      var item = this.items[i];
+      item.__die();
+    }
   },
 };
+
+function AccountsViewSlice(api, handle) {
+  BridgedViewSlice.call(this, api, 'accounts', handle);
+}
+AccountsViewSlice.prototype = Object.create(BridgedViewSlice.prototype);
+
+Object.defineProperty(AccountsViewSlice.prototype, 'defaultAccount', {
+  get: function () {
+    var defaultAccount = this.items[0];
+    for (var i = 1; i < this.items.length; i++) {
+      // For UI upgrades, the defaultPriority may not be set, so default to
+      // zero for comparisons
+      if ((this.items[i]._wireRep.defaultPriority || 0) >
+          (defaultAccount._wireRep.defaultPriority || 0))
+        defaultAccount = this.items[i];
+    }
+
+    return defaultAccount;
+  }
+});
 
 function FoldersViewSlice(api, handle) {
   BridgedViewSlice.call(this, api, 'folders', handle);
@@ -978,10 +1928,11 @@ FoldersViewSlice.prototype.getFirstFolderWithName = function(name, items) {
 function HeadersViewSlice(api, handle, ns) {
   BridgedViewSlice.call(this, api, ns || 'headers', handle);
 
-  this._snippetRequestId = 1;
-  this._snippetRequests = {};
+  this._bodiesRequestId = 1;
+  this._bodiesRequest = {};
 }
 HeadersViewSlice.prototype = Object.create(BridgedViewSlice.prototype);
+
 /**
  * Request a re-sync of the time interval covering the effective time
  * range.  If the most recently displayed message is the most recent message
@@ -997,23 +1948,30 @@ HeadersViewSlice.prototype.refresh = function() {
     });
 };
 
-HeadersViewSlice.prototype._notifyRequestSnippetsComplete = function(reqId) {
-  var callback = this._snippetRequests[reqId];
+HeadersViewSlice.prototype._notifyRequestBodiesComplete = function(reqId) {
+  var callback = this._bodiesRequest[reqId];
   if (reqId && callback) {
     callback(true);
-    delete this._snippetRequests[reqId];
+    delete this._bodiesRequest[reqId];
   }
 };
 
 /**
- * Request snippets for range of headers in the slice.
+ * Requests bodies (if of a reasonable size) given a start/end position.
  *
  *    // start/end inclusive
- *    slice.maybeRequestSnippets(5, 10);
+ *    slice.maybeRequestBodies(5, 10);
  *
  * The results will be sent through the standard slice/header events.
  */
-HeadersViewSlice.prototype.maybeRequestSnippets = function(idxStart, idxEnd, callback) {
+HeadersViewSlice.prototype.maybeRequestBodies =
+  function(idxStart, idxEnd, options, callback) {
+
+  if (typeof(options) === 'function') {
+    callback = options;
+    options = null;
+  }
+
   var messages = [];
 
   idxEnd = Math.min(idxEnd, this.items.length - 1);
@@ -1038,14 +1996,15 @@ HeadersViewSlice.prototype.maybeRequestSnippets = function(idxStart, idxEnd, cal
   if (!messages.length)
     return callback && window.setZeroTimeout(callback, false);
 
-  var reqId = this._snippetRequestId++;
-  this._snippetRequests[reqId] = callback;
+  var reqId = this._bodiesRequestId++;
+  this._bodiesRequest[reqId] = callback;
 
   this._api.__bridgeSend({
-    type: 'requestSnippets',
+    type: 'requestBodies',
     handle: this._handle,
     requestId: reqId,
-    messages: messages
+    messages: messages,
+    options: options
   });
 };
 
@@ -1075,8 +2034,22 @@ function MessageComposition(api, handle) {
   this.body = null;
 
   this._references = null;
-  this._customHeaders = null;
+  /**
+   * @property attachments
+   * @type Object[]
+   *
+   * A list of attachments currently attached or currently being attached with
+   * the following attributes:
+   * - name: The filename
+   * - size: The size of the attachment payload in binary form.  This does not
+   *   include transport encoding costs.
+   *
+   * Manipulating this list has no effect on reality; the methods addAttachment
+   * and removeAttachment must be used.
+   */
   this.attachments = null;
+
+  this.hasDraft = false;
 }
 MessageComposition.prototype = {
   toString: function() {
@@ -1097,16 +2070,26 @@ MessageComposition.prototype = {
   },
 
   /**
-   * Add custom headers; don't use this for built-in headers.
-   */
-  addHeader: function(key, value) {
-    if (!this._customHeaders)
-      this._customHeaders = [];
-    this._customHeaders.push(key);
-    this._customHeaders.push(value);
-  },
-
-  /**
+   * Add an attachment to this composition.  This is an asynchronous process
+   * that incrementally converts the Blob we are provided into a line-wrapped
+   * base64-encoded message suitable for use in the rfc2822 message generation
+   * process.  We will perform the conversion in slices whose sizes are
+   * chosen to avoid causing a memory usage explosion that causes us to be
+   * reaped.  Once the conversion is completed we will forget the Blob reference
+   * provided to us.
+   *
+   * From the perspective of our drafts, an attachment is not fully attached
+   * until it has been completely encoded, sliced, and persisted to our
+   * IndexedDB database.  In the event of a crash during this time window,
+   * the attachment will effectively have not been attached.  Our logic will
+   * discard the partially-translated attachment when de-persisting the draft.
+   * We will, however, create an entry in the attachments array immediately;
+   * we also return it to you.  You should be able to safely call
+   * removeAttachment with it regardless of what has happened on the backend.
+   *
+   * The caller *MUST* forget all references to the Blob that is being attached
+   * after issuing this call.
+   *
    * @args[
    *   @param[attachmentDef @dict[
    *     @key[name String]
@@ -1114,14 +2097,37 @@ MessageComposition.prototype = {
    *   ]]
    * ]
    */
-  addAttachment: function(attachmentDef) {
-    this.attachments.push(attachmentDef);
+  addAttachment: function(attachmentDef, callback) {
+    // There needs to be a draft for us to attach things to.
+    if (!this.hasDraft)
+      this.saveDraft();
+    this._api._composeAttach(this._handle, attachmentDef, callback);
+
+    var placeholderAttachment = {
+      name: attachmentDef.name,
+      blob: {
+        size: attachmentDef.blob.size,
+        type: attachmentDef.blob.type
+      }
+    };
+    this.attachments.push(placeholderAttachment);
+    return placeholderAttachment;
   },
 
-  removeAttachment: function(attachmentDef) {
+  /**
+   * Remove an attachment previously requested to be added via `addAttachment`.
+   *
+   * @method removeAttachment
+   * @param attachmentDef Object
+   *   This must be one of the instances from our `attachments` list.  A
+   *   logically equivalent object is no good.
+   */
+  removeAttachment: function(attachmentDef, callback) {
     var idx = this.attachments.indexOf(attachmentDef);
-    if (idx !== -1)
+    if (idx !== -1) {
       this.attachments.splice(idx, 1);
+      this._api._composeDetach(this._handle, idx, callback);
+    }
   },
 
   /**
@@ -1136,7 +2142,6 @@ MessageComposition.prototype = {
       subject: this.subject,
       body: this.body,
       referencesStr: this._references,
-      customHeaders: this._customHeaders,
       attachments: this.attachments,
     };
   },
@@ -1182,6 +2187,7 @@ MessageComposition.prototype = {
    * Save the state of this composition.
    */
   saveDraft: function(callback) {
+    this.hasDraft = true;
     this._api._composeDone(this._handle, 'save', this._buildWireRep(),
                            callback);
   },
@@ -1200,8 +2206,7 @@ MessageComposition.prototype = {
 
 };
 
-
-var LEGAL_CONFIG_KEYS = ['syncCheckIntervalEnum'];
+var LEGAL_CONFIG_KEYS = [];
 
 /**
  * Error reporting helper; we will probably eventually want different behaviours
@@ -1253,14 +2258,19 @@ var unexpectedBridgeDataError = reportError,
 //                       something that looks domain-namey.  We differ from the
 //                       next case in that we do not constrain the top-level
 //                       domain as tightly and do not require a trailing path
-//                       indicator of "/".
+//                       indicator of "/".  This is IDN root compatible.
 //   [a-z0-9.\-]{2,250}[.][a-z]{2,4}\/
 //                       Detect a non-www domain, but requiring a trailing "/"
-//                       to indicate a path.
+//                       to indicate a path.  This only detects IDN domains
+//                       with a non-IDN root.  This is reasonable in cases where
+//                       there is no explicit http/https start us out, but
+//                       unreasonable where there is.  Our real fix is the bug
+//                       to port the Thunderbird/gecko linkification logic.
 //
 //                       Domain names can be up to 253 characters long, and are
 //                       limited to a-zA-Z0-9 and '-'.  The roots don't have
-//                       hyphens.
+//                       hyphens unless they are IDN roots.  Root zones can be
+//                       found here: http://www.iana.org/domains/root/db
 //  )
 //  [-\w.!~*'();,/?:@&=+$#%]*
 //                       path onwards. We allow the set of characters that
@@ -1278,8 +2288,21 @@ var RE_UNEAT_LAST_URL_CHARS = /(?:[),;.!?]|[.!?]\)|\)[.!?])$/;
 // our above regex currently requires them.
 var RE_HTTP = /^https?:/i;
 // Note: the [^\s] is fairly international friendly, but might be too friendly.
+//
+// Note: We've added support for IDN domains in the e-mail regexp.  We would
+// expect optimal presentation of IDN-based e-mail addresses to be using HTML
+// mails with an 'a' tag so that the human-readable address is present/visible,
+// but we can't be sure of that.
+//
+// Brief analysis:
+//   [a-z0-9.\-]{2,250}[.][a-z0-9\-]{2,32}
+//                       Domain portion.  We have looser constraints on the
+//                       root in terms of size since we already have the '@'
+//                       giving us a high probability of an e-mail address.
+//                       Otherwise we use the same base regexp from our URL
+//                       logic.
 var RE_MAIL =
-  /(^|[\s(,;])([^(,;@\s]+@[^.\s]+.[a-z]+)/m;
+  /(^|[\s(,;])([^(,;@\s]+@[a-z0-9.\-]{2,250}[.][a-z0-9\-]{2,32})/im;
 var RE_MAILTO = /^mailto:/i;
 
 var MailUtils = {
@@ -1387,6 +2410,23 @@ function MailAPI() {
   this._slices = {};
   this._pendingRequests = {};
   this._liveBodies = {};
+  /**
+   * Functions to invoke to actually process/fire splices.  Exists to support
+   * the fallout of waiting for contact resolution now that slice changes are
+   * batched.
+   */
+  this._spliceFireFuncs = [];
+
+  // Store bridgeSend messages received before back end spawns.
+  this._storedSends = [];
+
+  this._processingMessage = null;
+  /**
+   * List of received messages whose processing is being deferred because we
+   * still have a message that is actively being processed, as stored in
+   * `_processingMessage`.
+   */
+  this._deferredMessages = [];
 
   /**
    * @dict[
@@ -1418,6 +2458,8 @@ function MailAPI() {
    * }
    */
   this.onbadlogin = null;
+
+  ContactCache.init();
 }
 exports.MailAPI = MailAPI;
 MailAPI.prototype = {
@@ -1435,20 +2477,36 @@ MailAPI.prototype = {
    * with the backend using only a postMessage-style JSON channel.
    */
   __bridgeSend: function(msg) {
-    // actually, this method gets clobbered.
+    // This method gets clobbered eventually once back end worker is ready.
+    // Until then, it will store calls to send to the back end.
+
+    this._storedSends.push(msg);
   },
 
   /**
    * Process a message received from the bridge.
    */
   __bridgeReceive: function ma___bridgeReceive(msg) {
+    // Pong messages are used for tests
+    if (this._processingMessage && msg.type !== 'pong') {
+      this._deferredMessages.push(msg);
+    }
+    else {
+      this._processMessage(msg);
+    }
+  },
+
+  _processMessage: function ma__processMessage(msg) {
     var methodName = '_recv_' + msg.type;
     if (!(methodName in this)) {
       unexpectedBridgeDataError('Unsupported message type:', msg.type);
       return;
     }
     try {
-      this[methodName](msg);
+      var done = this[methodName](msg);
+      if (!done) {
+        this._processingMessage = msg;
+      }
     }
     catch (ex) {
       internalError('Problem handling message type:', msg.type, ex,
@@ -1457,43 +2515,218 @@ MailAPI.prototype = {
     }
   },
 
-  _recv_badLogin: function ma__recv_badLogin(msg) {
-    if (this.onbadlogin)
-      this.onbadlogin(new MailAccount(this, msg.account), msg.problem);
+  _doneProcessingMessage: function(msg) {
+    if (this._processingMessage && this._processingMessage !== msg)
+      throw new Error('Mismatched message completion!');
+
+    this._processingMessage = null;
+    while (this._processingMessage === null && this._deferredMessages.length) {
+      this._processMessage(this._deferredMessages.shift());
+    }
   },
 
-  _recv_sliceSplice: function ma__recv_sliceSplice(msg) {
-    var slice = this._slices[msg.handle];
-    if (!slice) {
-      unexpectedBridgeDataError('Received message about a nonexistent slice:',
-                                msg.handle);
-      return;
+  _recv_badLogin: function ma__recv_badLogin(msg) {
+    if (this.onbadlogin)
+      this.onbadlogin(new MailAccount(this, msg.account, null), msg.problem);
+    return true;
+  },
+
+  _fireAllSplices: function() {
+    for (var i = 0; i < this._spliceFireFuncs.length; i++) {
+      var fireSpliceData = this._spliceFireFuncs[i];
+      fireSpliceData();
     }
 
-    var addItems = msg.addItems, transformedItems = [], i, stopIndex;
+    this._spliceFireFuncs.length = 0;
+  },
+
+  _recv_batchSlice: function receiveBatchSlice(msg) {
+    var slice = this._slices[msg.handle];
+    if (!slice) {
+      unexpectedBridgeDataError("Received message about nonexistent slice:", msg.handle);
+      return true;
+    }
+
+    var updateStatus = this._updateSliceStatus(msg, slice);
+    for (var i = 0; i < msg.sliceUpdates.length; i++) {
+      var update = msg.sliceUpdates[i];
+      if (update.type === 'update') {
+        // Updates are performed and fire immediately/synchronously
+        this._processSliceUpdate(msg, update, slice);
+      } else {
+        // Added items are transformed immediately, but the actual mutation of
+        // the slice and notifications do not fire until _fireAllSplices().
+        this._transformAndEnqueueSingleSplice(msg, update, slice);
+      }
+    }
+
+    // If there are pending contact resolutions, we need to wait them to
+    // complete before processing and firing the splices.
+    if (ContactCache.pendingLookupCount) {
+      ContactCache.callbacks.push(function contactsResolved() {
+        this._fireAllSplices();
+        this._fireStatusNotifications(updateStatus, slice);
+        this._doneProcessingMessage(msg);
+      }.bind(this));
+      // (Wait for us to call _doneProcessingMessage before processing the next
+      // message.  This also means this method will only push one callback.)
+      return false;
+    }
+
+    this._fireAllSplices();
+    this._fireStatusNotifications(updateStatus, slice);
+    return true; // All done processing; feel free to process the next msg.
+  },
+
+  _fireStatusNotifications: function (updateStatus, slice) {
+    if (updateStatus && slice.onstatus) {
+      slice.onstatus(slice.status);
+    }
+  },
+
+  _updateSliceStatus: function(msg, slice) {
+    // - generate namespace-specific notifications
+    slice.atTop = msg.atTop;
+    slice.atBottom = msg.atBottom;
+    slice.userCanGrowUpwards = msg.userCanGrowUpwards;
+    slice.userCanGrowDownwards = msg.userCanGrowDownwards;
+
+    // Have to update slice status before we actually do the work
+    var generatedStatusChange = (msg.status &&
+      (slice.status !== msg.status ||
+      slice.syncProgress !== msg.progress));
+
+    if (msg.status) {
+      slice.status = msg.status;
+      slice.syncProgress = msg.syncProgress;
+    }
+
+    return generatedStatusChange;
+  },
+
+  _processSliceUpdate: function (msg, splice, slice) {
+    try {
+      for (var i = 0; i < splice.length; i += 2) {
+        var idx = splice[i], wireRep = splice[i + 1],
+            itemObj = slice.items[idx];
+        itemObj.__update(wireRep);
+        if (slice.onchange) {
+          slice.onchange(itemObj, idx);
+        }
+        if (itemObj.onchange) {
+          itemObj.onchange(itemObj, idx);
+        }
+      }
+    }
+    catch (ex) {
+      reportClientCodeError('onchange notification error', ex,
+                            '\n', ex.stack);
+    }
+  },
+
+  /**
+   * Transform the slice splice (for contact-resolution side-effects) and
+   * enqueue the eventual processing and firing of the splice once all contacts
+   * have been resolved.
+   */
+  _transformAndEnqueueSingleSplice: function(msg, splice, slice) {
+   var transformedItems = this._transform_sliceSplice(splice, slice);
+   var fake = false;
+    // It's possible that a transformed representation is depending on an async
+    // call to mozContacts.  In this case, we don't want to surface the data to
+    // the UI until the contacts are fully resolved in order to avoid the UI
+    // flickering or just triggering reflows that could otherwise be avoided.
+    // Since we could be processing multiple updates, just batch everything here
+    // and we'll check later to see if any of our splices requires a contact
+    // lookup
+    this._spliceFireFuncs.push(function singleSpliceUpdate() {
+      this._fireSplice(splice, slice, transformedItems, fake);
+    }.bind(this));
+  },
+
+  /**
+   * Perform the actual splice, generating notifications.
+   */
+  _fireSplice: function(splice, slice, transformedItems, fake) {
+    var i, stopIndex, items, tempMsg;
+
+    // - generate slice 'onsplice' notification
+    if (slice.onsplice) {
+      try {
+        slice.onsplice(splice.index, splice.howMany, transformedItems,
+                       splice.requested, splice.moreExpected, fake);
+      }
+      catch (ex) {
+        reportClientCodeError('onsplice notification error', ex,
+                              '\n', ex.stack);
+      }
+    }
+    // - generate item 'onremove' notifications
+    if (splice.howMany) {
+      try {
+        stopIndex = splice.index + splice.howMany;
+        for (i = splice.index; i < stopIndex; i++) {
+          var item = slice.items[i];
+          if (slice.onremove)
+            slice.onremove(item, i);
+          if (item.onremove)
+            item.onremove(item, i);
+          // the item needs a chance to clean up after itself.
+          item.__die();
+        }
+      }
+      catch (ex) {
+        reportClientCodeError('onremove notification error', ex,
+                              '\n', ex.stack);
+      }
+    }
+    // - perform actual splice
+    slice.items.splice.apply(
+      slice.items,
+      [splice.index, splice.howMany].concat(transformedItems));
+
+    // - generate item 'onadd' notifications
+    if (slice.onadd) {
+      try {
+        stopIndex = splice.index + transformedItems.length;
+        for (i = splice.index; i < stopIndex; i++) {
+          slice.onadd(slice.items[i], i);
+        }
+      }
+      catch (ex) {
+        reportClientCodeError('onadd notification error', ex,
+                              '\n', ex.stack);
+      }
+    }
+
+    // - generate 'oncomplete' notification
+    if (splice.requested && !splice.moreExpected) {
+      slice._growing = 0;
+      if (slice.pendingRequestCount)
+        slice.pendingRequestCount--;
+
+      if (slice.oncomplete) {
+        var completeFunc = slice.oncomplete;
+        // reset before calling in case it wants to chain.
+        slice.oncomplete = null;
+        try {
+          // Maybe defer here?
+          completeFunc(splice.newEmailCount);
+        }
+        catch (ex) {
+          reportClientCodeError('oncomplete notification error', ex,
+                                '\n', ex.stack);
+        }
+      }
+    }
+  },
+
+  _transform_sliceSplice: function ma__transform_sliceSplice(splice, slice) {
+    var addItems = splice.addItems, transformedItems = [], i;
     switch (slice._ns) {
       case 'accounts':
-
-        if (typeof document !== 'undefined') {
-          var hasAccounts = hasAccountCookie();
-          if (addItems.length && !hasAccounts) {
-            // Sets a cookie indicating where there are accounts to enable fast
-            // load of "add account" screen without loading the email backend.
-            // Set to 20 years from now.
-            var expiry = Date.now() + (20 * 365 * 24 * 60 * 60 * 1000);
-            expiry = (new Date(expiry)).toUTCString();
-            document.cookie = 'mailHasAccounts; expires=' + expiry;
-            this.hasAccounts = true;
-          } else if (!addItems.length && hasAccounts) {
-            // Reset cookie to indicate no accounts. Important
-            // to allow fast path _fake account guess to guess correctly.
-            document.cookie = '';
-            this.hasAccounts = false;
-          }
-        }
-
         for (i = 0; i < addItems.length; i++) {
-          transformedItems.push(new MailAccount(this, addItems[i]));
+          transformedItems.push(new MailAccount(this, addItems[i], slice));
         }
         break;
 
@@ -1527,110 +2760,7 @@ MailAPI.prototype = {
         break;
     }
 
-    // - generate namespace-specific notifications
-    slice.atTop = msg.atTop;
-    slice.atBottom = msg.atBottom;
-    slice.userCanGrowUpwards = msg.userCanGrowUpwards;
-    slice.userCanGrowDownwards = msg.userCanGrowDownwards;
-    if (msg.status &&
-        (slice.status !== msg.status ||
-         slice.syncProgress !== msg.progress)) {
-      slice.status = msg.status;
-      slice.syncProgress = msg.progress;
-      if (slice.onstatus)
-        slice.onstatus(slice.status);
-    }
-
-    // - generate slice 'onsplice' notification
-    if (slice.onsplice) {
-      try {
-        slice.onsplice(msg.index, msg.howMany, transformedItems,
-                       msg.requested, msg.moreExpected);
-      }
-      catch (ex) {
-        reportClientCodeError('onsplice notification error', ex,
-                              '\n', ex.stack);
-      }
-    }
-    // - generate item 'onremove' notifications
-    if (msg.howMany) {
-      try {
-        stopIndex = msg.index + msg.howMany;
-        for (i = msg.index; i < stopIndex; i++) {
-          var item = slice.items[i];
-          if (slice.onremove)
-            slice.onremove(item, i);
-          if (item.onremove)
-            item.onremove(item, i);
-        }
-      }
-      catch (ex) {
-        reportClientCodeError('onremove notification error', ex,
-                              '\n', ex.stack);
-      }
-    }
-    // - perform actual splice
-    slice.items.splice.apply(slice.items,
-                             [msg.index, msg.howMany].concat(transformedItems));
-    // - generate item 'onadd' notifications
-    if (slice.onadd) {
-      try {
-        stopIndex = msg.index + transformedItems.length;
-        for (i = msg.index; i < stopIndex; i++) {
-          slice.onadd(slice.items[i], i);
-        }
-      }
-      catch (ex) {
-        reportClientCodeError('onadd notification error', ex,
-                              '\n', ex.stack);
-      }
-    }
-
-    // - generate 'oncomplete' notification
-    if (msg.requested && !msg.moreExpected) {
-      slice._growing = 0;
-      if (slice.pendingRequestCount)
-        slice.pendingRequestCount--;
-
-      if (slice.oncomplete) {
-        var completeFunc = slice.oncomplete;
-        // reset before calling in case it wants to chain.
-        slice.oncomplete = null;
-        try {
-          completeFunc();
-        }
-        catch (ex) {
-          reportClientCodeError('oncomplete notification error', ex,
-                                '\n', ex.stack);
-        }
-      }
-    }
-  },
-
-  _recv_sliceUpdate: function ma__recv_sliceUpdate(msg) {
-    var slice = this._slices[msg.handle];
-    if (!slice) {
-      unexpectedBridgeDataError('Received message about a nonexistent slice:',
-                                msg.handle);
-      return;
-    }
-
-    var updates = msg.updates;
-    try {
-      for (var i = 0; i < updates.length; i += 2) {
-        var idx = updates[i], wireRep = updates[i + 1],
-            itemObj = slice.items[idx];
-        itemObj.__update(wireRep);
-        if (slice.onchange)
-          slice.onchange(itemObj, idx);
-        if (itemObj.onchange)
-          itemObj.onchange(itemObj, idx);
-      }
-    }
-    catch (ex) {
-      reportClientCodeError('onchange notification error', ex,
-                            '\n', ex.stack);
-    }
+    return transformedItems;
   },
 
   _recv_sliceDead: function(msg) {
@@ -1639,14 +2769,18 @@ MailAPI.prototype = {
     if (slice.ondead)
       slice.ondead(slice);
     slice.ondead = null;
+
+    return true;
   },
 
   _getBodyForMessage: function(header, options, callback) {
-
-    var downloadBodyReps = false;
+    var downloadBodyReps = false, withBodyReps = false;
 
     if (options && options.downloadBodyReps) {
       downloadBodyReps = options.downloadBodyReps;
+    }
+    if (options && options.withBodyReps) {
+      withBodyReps = options.withBodyReps;
     }
 
     var handle = this._nextHandle++;
@@ -1660,7 +2794,8 @@ MailAPI.prototype = {
       handle: handle,
       suid: header.id,
       date: header.date.valueOf(),
-      downloadBodyReps: downloadBodyReps
+      downloadBodyReps: downloadBodyReps,
+      withBodyReps: withBodyReps
     });
   },
 
@@ -1668,7 +2803,7 @@ MailAPI.prototype = {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for got body:', msg.handle);
-      return;
+      return true;
     }
     delete this._pendingRequests[msg.handle];
 
@@ -1681,13 +2816,17 @@ MailAPI.prototype = {
     }
 
     req.callback.call(null, body);
+
+    return true;
   },
 
-  _recv_requestSnippetsComplete: function(msg) {
+  _recv_requestBodiesComplete: function(msg) {
     var slice = this._slices[msg.handle];
     // The slice may be dead now!
     if (slice)
-      slice._notifyRequestSnippetsComplete(msg.requestId);
+      slice._notifyRequestBodiesComplete(msg.requestId);
+
+    return true;
   },
 
   _recv_bodyModified: function(msg) {
@@ -1697,23 +2836,24 @@ MailAPI.prototype = {
       unexpectedBridgeDataError('body modified for dead handle', msg.handle);
       // possible but very unlikely race condition where body is modified while
       // we are removing the reference to the observer...
-      return;
+      return true;
     }
+
+    var wireRep = msg.bodyInfo;
+    // We update the body representation regardless of whether there is an
+    // onchange listener because the body may contain Blob handles that need to
+    // be updated so that in-memory blobs that have been superseded by on-disk
+    // Blobs can be garbage collected.
+    body.__update(wireRep, msg.detail);
 
     if (body.onchange) {
-      // there may be many kinds of updates we want to support but we only
-      // support updating the bodyReps reference currently.
-      switch (msg.detail.changeType) {
-        case 'bodyReps':
-          body.bodyReps = msg.bodyInfo.bodyReps;
-          break;
-      }
-
       body.onchange(
         msg.detail,
-        msg.bodyInfo
+        body
       );
     }
+
+    return true;
   },
 
   _recv_bodyDead: function(msg) {
@@ -1724,6 +2864,7 @@ MailAPI.prototype = {
     }
 
     delete this._liveBodies[msg.handle];
+    return true;
   },
 
   _downloadAttachments: function(body, relPartIndices, attachmentIndices,
@@ -1751,25 +2892,17 @@ MailAPI.prototype = {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for got body:', msg.handle);
-      return;
+      return true;
     }
     delete this._pendingRequests[msg.handle];
 
-    // What will have changed are the attachment lists, so update them.
-    if (msg.bodyInfo) {
-      if (req.relParts)
-        req.body._relatedParts = msg.bodyInfo.relatedParts;
-      if (req.attachments) {
-        var wireAtts = msg.bodyInfo.attachments;
-        for (var i = 0; i < wireAtts.length; i++) {
-          var wireAtt = wireAtts[i], bodyAtt = req.body.attachments[i];
-          bodyAtt.sizeEstimateInBytes = wireAtt.sizeEstimate;
-          bodyAtt._file = wireAtt.file;
-        }
-      }
-    }
+    // We used to update the attachment representations here.  This is now
+    // handled by `bodyModified` notifications which are guaranteed to occur
+    // prior to this callback being invoked.
+
     if (req.callback)
       req.callback.call(null, req.body);
+    return true;
   },
 
   /**
@@ -1812,6 +2945,9 @@ MailAPI.prototype = {
    *     The username and password didn't check out.  We don't know which one
    *     is wrong, just that one of them is wrong.
    *   }
+   *   @case['pop-server-not-great']{
+   *     The POP3 server doesn't support IDLE and TOP, so we can't use it.
+   *   }
    *   @case['imap-disabled']{
    *     IMAP support is not enabled for the Gmail account in use.
    *   }
@@ -1834,6 +2970,10 @@ MailAPI.prototype = {
    *     disabled in general or when we try and login the message provides
    *     positive indications of some type of maintenance rather than a
    *     generic error string.
+   *   }
+   *   @case['user-account-exists']{
+   *     If the user tries to create an account which is already configured.
+   *     Should not be created. We will show that account is already configured
    *   }
    *   @case['unknown']{
    *     We don't know what happened; count this as our bug for not knowing.
@@ -1892,20 +3032,34 @@ MailAPI.prototype = {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for create account:', msg.handle);
-      return;
+      return true;
     }
     delete this._pendingRequests[msg.handle];
 
     // The account info here is currently for unit testing only; it's our wire
     // protocol instead of a full MailAccount.
     req.callback.call(null, msg.error, msg.errorDetails, msg.account);
+    return true;
   },
 
-  _clearAccountProblems: function ma__clearAccountProblems(account) {
+  _clearAccountProblems: function ma__clearAccountProblems(account, callback) {
+    var handle = this._nextHandle++;
+    this._pendingRequests[handle] = {
+      type: 'clearAccountProblems',
+      callback: callback,
+    };
     this.__bridgeSend({
       type: 'clearAccountProblems',
       accountId: account.id,
+      handle: handle,
     });
+  },
+
+  _recv_clearAccountProblems: function ma__recv_clearAccountProblems(msg) {
+    var req = this._pendingRequests[msg.handle];
+    delete this._pendingRequests[msg.handle];
+    req.callback && req.callback();
+    return true;
   },
 
   _modifyAccount: function ma__modifyAccount(account, mods) {
@@ -1924,12 +3078,6 @@ MailAPI.prototype = {
   },
 
   /**
-   * Shortcut flag to indicate if there are accounts configured.
-   * Only useful in browser environments that have cookies enabled.
-   */
-  hasAccounts: hasAccountCookie(),
-
-  /**
    * Get the list of accounts.  This can be used for the list of accounts in
    * setttings or for a folder tree where only one account's folders are visible
    * at a time.
@@ -1944,7 +3092,7 @@ MailAPI.prototype = {
    */
   viewAccounts: function ma_viewAccounts(realAccountsOnly) {
     var handle = this._nextHandle++,
-        slice = new BridgedViewSlice(this, 'accounts', handle);
+        slice = new AccountsViewSlice(this, handle);
     this._slices[handle] = slice;
 
     this.__bridgeSend({
@@ -1992,6 +3140,7 @@ MailAPI.prototype = {
   viewFolders: function ma_viewFolders(mode, argument) {
     var handle = this._nextHandle++,
         slice = new FoldersViewSlice(this, handle);
+
     this._slices[handle] = slice;
 
     this.__bridgeSend({
@@ -2011,6 +3160,7 @@ MailAPI.prototype = {
   viewFolderMessages: function ma_viewFolderMessages(folder) {
     var handle = this._nextHandle++,
         slice = new HeadersViewSlice(this, handle);
+    slice.folderId = folder.id;
     // the initial population counts as a request.
     slice.pendingRequestCount++;
     this._slices[handle] = slice;
@@ -2181,17 +3331,38 @@ MailAPI.prototype = {
     });
   },
 
+  /**
+   * Parse a structured email address
+   * into a display name and email address parts.
+   * It will return null on a parse failure.
+   *
+   * @param {String} email A email address.
+   * @return {Object} An object of the form { name, address }.
+   */
+  parseMailbox: function(email) {
+    try {
+      var mailbox = addressparser(email);
+      return (mailbox.length >= 1) ? mailbox[0] : null;
+    }
+    catch (ex) {
+      reportClientCodeError('parse mailbox error', ex,
+                            '\n', ex.stack);
+      return null;
+    }
+  },
+
   _recv_mutationConfirmed: function(msg) {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for mutation:', msg.handle);
-      return;
+      return true;
     }
 
     req.undoableOp._tempHandle = null;
     req.undoableOp._longtermIds = msg.longtermIds;
     if (req.undoableOp._undoRequested)
       req.undoableOp.undo();
+    return true;
   },
 
   __undo: function undo(undoableOp) {
@@ -2199,6 +3370,17 @@ MailAPI.prototype = {
       type: 'undo',
       longtermIds: undoableOp._longtermIds,
     });
+  },
+
+  //////////////////////////////////////////////////////////////////////////////
+  // Contact Support
+
+  resolveEmailAddressToPeep: function(emailAddress, callback) {
+    var peep = ContactCache.resolvePeep({ name: null, address: emailAddress });
+    if (ContactCache.pendingLookupCount)
+      ContactCache.callbacks.push(callback.bind(null, peep));
+    else
+      callback(peep);
   },
 
   //////////////////////////////////////////////////////////////////////////////
@@ -2268,7 +3450,7 @@ MailAPI.prototype = {
       msg.refSuid = options.replyTo.id;
       msg.refDate = options.replyTo.date.valueOf();
       msg.refGuid = options.replyTo.guid;
-      msg.refAuthor = options.replyTo.author;
+      msg.refAuthor = options.replyTo.author.toWireRep();
       msg.refSubject = options.replyTo.subject;
     }
     else if (options.hasOwnProperty('forwardOf') && options.forwardOf) {
@@ -2277,7 +3459,7 @@ MailAPI.prototype = {
       msg.refSuid = options.forwardOf.id;
       msg.refDate = options.forwardOf.date.valueOf();
       msg.refGuid = options.forwardOf.guid;
-      msg.refAuthor = options.forwardOf.author;
+      msg.refAuthor = options.forwardOf.author.toWireRep();
       msg.refSubject = options.forwardOf.subject;
     }
     else {
@@ -2332,7 +3514,7 @@ MailAPI.prototype = {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for compose begun:', msg.handle);
-      return;
+      return true;
     }
 
     req.composer.senderIdentity = new MailSenderIdentity(this, msg.identity);
@@ -2349,6 +3531,77 @@ MailAPI.prototype = {
       req.callback = null;
       callback.call(null, req.composer);
     }
+    return true;
+  },
+
+  _composeAttach: function(draftHandle, attachmentDef, callback) {
+    if (!draftHandle) {
+      return;
+    }
+    var draftReq = this._pendingRequests[draftHandle];
+    if (!draftReq) {
+      return;
+    }
+    var callbackHandle = this._nextHandle++;
+    this._pendingRequests[callbackHandle] = {
+      type: 'attachBlobToDraft',
+      callback: callback
+    };
+    this.__bridgeSend({
+      type: 'attachBlobToDraft',
+      handle: callbackHandle,
+      draftHandle: draftHandle,
+      attachmentDef: attachmentDef
+    });
+  },
+
+  _recv_attachedBlobToDraft: function(msg) {
+    var callbackReq = this._pendingRequests[msg.handle];
+    var draftReq = this._pendingRequests[msg.draftHandle];
+    if (!callbackReq) {
+      return true;
+    }
+    delete this._pendingRequests[msg.handle];
+
+    if (callbackReq.callback && draftReq && draftReq.composer) {
+      callbackReq.callback(msg.err, draftReq.composer);
+    }
+    return true;
+  },
+
+  _composeDetach: function(draftHandle, attachmentIndex, callback) {
+    if (!draftHandle) {
+      return;
+    }
+    var draftReq = this._pendingRequests[draftHandle];
+    if (!draftReq) {
+      return;
+    }
+    var callbackHandle = this._nextHandle++;
+    this._pendingRequests[callbackHandle] = {
+      type: 'detachAttachmentFromDraft',
+      callback: callback
+    };
+    this.__bridgeSend({
+      type: 'detachAttachmentFromDraft',
+      handle: callbackHandle,
+      draftHandle: draftHandle,
+      attachmentIndex: attachmentIndex
+    });
+  },
+
+  _recv_detachedAttachmentFromDraft: function(msg) {
+    var callbackReq = this._pendingRequests[msg.handle];
+    var draftReq = this._pendingRequests[msg.draftHandle];
+    if (!callbackReq) {
+      return true;
+    }
+    delete this._pendingRequests[msg.handle];
+
+    if (callbackReq.callback && draftReq && draftReq.composer) {
+      callbackReq.callback(msg.err, draftReq.composer);
+    }
+    return true;
   },
 
   _composeDone: function(handle, command, state, callback) {
@@ -2373,17 +3626,48 @@ MailAPI.prototype = {
     var req = this._pendingRequests[msg.handle];
     if (!req) {
       unexpectedBridgeDataError('Bad handle for doneCompose:', msg.handle);
-      return;
+      return true;
     }
     req.active = null;
     // Do not cleanup on saves. Do cleanup on successful send, delete, die.
     if (req.type === 'die' || (!msg.err && (req.type !== 'save')))
       delete this._pendingRequests[msg.handle];
     if (req.callback) {
-      req.callback.call(null, msg.err, msg.badAddresses, msg.sentDate);
+      req.callback.call(null, msg.err, msg.badAddresses,
+                        { sentDate: msg.sentDate, messageId: msg.messageId });
       req.callback = null;
     }
+    return true;
   },
+
+  //////////////////////////////////////////////////////////////////////////////
+  // mode setting for back end universe. Set interactive
+  // if the user has been exposed to the UI and it is a
+  // longer lived application, not just a cron sync.
+  setInteractive: function() {
+    this.__bridgeSend({
+      type: 'setInteractive'
+    });
+  },
+
+  //////////////////////////////////////////////////////////////////////////////
+  // cron syncing
+
+  /**
+   * Receive events about the start and stop of periodic syncing
+   */
+  _recv_cronSyncStart: function ma__recv_cronSyncStart(msg) {
+    if (this.oncronsyncstart)
+      this.oncronsyncstart(msg.accountIds);
+    return true;
+  },
+
+  _recv_cronSyncStop: function ma__recv_cronSyncStop(msg) {
+    if (this.oncronsyncstop)
+      this.oncronsyncstop(msg.accountsResults);
+    return true;
+  },
+
 
   //////////////////////////////////////////////////////////////////////////////
   // Localization
@@ -2438,6 +3722,7 @@ MailAPI.prototype = {
     return name;
   },
 
+
   //////////////////////////////////////////////////////////////////////////////
   // Configuration
 
@@ -2458,16 +3743,20 @@ MailAPI.prototype = {
 
   _recv_config: function(msg) {
     this.config = msg.config;
+    return true;
   },
 
   //////////////////////////////////////////////////////////////////////////////
   // Diagnostics / Test Hacks
 
   /**
-   * Send a 'ping' to the bridge which will send a 'pong' back, notifying the
-   * provided callback.  This is intended to be hack to provide a way to ensure
-   * that some function only runs after all of the notifications have been
-   * received and processed by the back-end.
+   * After a setZeroTimeout, send a 'ping' to the bridge which will send a
+   * 'pong' back, notifying the provided callback.  This is intended to be hack
+   * to provide a way to ensure that some function only runs after all of the
+   * notifications have been received and processed by the back-end.
+   *
+   * Note that ping messages are always processed as they are received; they do
+   * not get deferred like other messages.
    */
   ping: function(callback) {
     var handle = this._nextHandle++;
@@ -2475,16 +3764,27 @@ MailAPI.prototype = {
       type: 'ping',
       callback: callback,
     };
-    this.__bridgeSend({
-      type: 'ping',
-      handle: handle,
-    });
+
+    // With the introduction of slice batching, we now wait to send the ping.
+    // This is reasonable because there are conceivable situations where the
+    // caller really wants to wait until all related callbacks fire before
+    // dispatching.  And the ping method is already a hack to ensure correctness
+    // ordering that should be done using better/more specific methods, so this
+    // change is not any less of a hack/evil, although it does cause misuse to
+    // potentially be more capable of causing intermittent failures.
+    window.setZeroTimeout(function() {
+      this.__bridgeSend({
+        type: 'ping',
+        handle: handle,
+      });
+    }.bind(this));
   },
 
   _recv_pong: function(msg) {
     var req = this._pendingRequests[msg.handle];
     delete this._pendingRequests[msg.handle];
     req.callback();
+    return true;
   },
 
   debugSupport: function(command, argument) {
@@ -2510,14 +3810,26 @@ define('mailapi/worker-support/main-router',[],function() {
   var worker = null;
 
   function register(module) {
-    var name = module.name;
+    var action,
+        name = module.name;
+
     modules.push(module);
 
-    listeners[name] = function(msg) {
-      module.process(msg.uid, msg.cmd, msg.args);
-    };
+    if (module.process) {
+      action = function(msg) {
+        module.process(msg.uid, msg.cmd, msg.args);
+      };
+    } else if (module.dispatch) {
+      action = function(msg) {
+        if (module.dispatch[msg.cmd]) {
+          module.dispatch[msg.cmd].apply(module.dispatch, msg.args);
+        }
+      };
+    }
 
-    module.sendMessage = function(uid, cmd, args) {
+    listeners[name] = action;
+
+    module.sendMessage = function(uid, cmd, args, transferArgs) {
     //dump('\x1b[34mM => w: send: ' + name + ' ' + uid + ' ' + cmd + '\x1b[0m\n');
       //debug('onmessage: ' + name + ": " + uid + " - " + cmd);
       worker.postMessage({
@@ -2525,7 +3837,7 @@ define('mailapi/worker-support/main-router',[],function() {
         uid: uid,
         cmd: cmd,
         args: args
-      });
+      }, transferArgs);
     };
   }
 
@@ -2587,7 +3899,8 @@ define('mailapi/worker-support/configparser-main',[],function() {
     var provider = getNode('/clientConfig/emailProvider');
     // Get the first incomingServer we can use (we assume first == best).
     var incoming = getNode('incomingServer[@type="imap"] | ' +
-                           'incomingServer[@type="activesync"]', provider);
+                           'incomingServer[@type="activesync"] | ' +
+                           'incomingServer[@type="pop3"]', provider);
     var outgoing = getNode('outgoingServer[@type="smtp"]', provider);
 
     var config = null;
@@ -2602,15 +3915,19 @@ define('mailapi/worker-support/configparser-main',[],function() {
       if (incoming.getAttribute('type') === 'activesync') {
         config.type = 'activesync';
       } else if (outgoing) {
-        config.type = 'imap+smtp';
+        var isImap = incoming.getAttribute('type') === 'imap';
+
+        config.type = isImap ? 'imap+smtp' : 'pop3+smtp';
         for (var iter in Iterator(outgoing.children)) {
           var child = iter[1];
           config.outgoing[child.tagName] = child.textContent;
         }
 
+        var ALLOWED_SOCKET_TYPES = ['SSL', 'STARTTLS'];
+
         // We do not support unencrypted connections outside of unit tests.
-        if (config.incoming.socketType !== 'SSL' ||
-            config.outgoing.socketType !== 'SSL') {
+        if (ALLOWED_SOCKET_TYPES.indexOf(config.incoming.socketType) === -1 ||
+            ALLOWED_SOCKET_TYPES.indexOf(config.outgoing.socketType) === -1) {
           config = null;
           status = 'unsafe';
         }
@@ -2732,103 +4049,267 @@ define('mailapi/worker-support/configparser-main',[],function() {
   return self;
 });
 
-define('mailapi/worker-support/cronsync-main',[],function() {
+/*jshint browser: true */
+/*global define, console */
+define('mailapi/worker-support/cronsync-main',['require','evt'],function(require) {
   'use strict';
 
+  var evt = require('evt');
+
   function debug(str) {
-    //dump('CronSync: ' + str + '\n');
+    console.log('cronsync-main: ' + str);
   }
 
-  function clearAlarms() {
-    if (navigator.mozAlarms) {
-      var req = navigator.mozAlarms.getAll();
-      req.onsuccess = function(event) {
+  function makeData(accountIds, interval, date) {
+    return {
+      type: 'sync',
+      accountIds: accountIds,
+      interval: interval,
+      timestamp: date.getTime()
+    };
+  }
+
+  // Creates a string key from an array of string IDs. Uses a space
+  // separator since that cannot show up in an ID.
+  function makeAccountKey(accountIds) {
+    return 'id' + accountIds.join(' ');
+  }
+
+  // Converts 'interval' + intervalInMillis to just a intervalInMillis
+  // Number.
+  var prefixLength = 'interval'.length;
+  function toInterval(intervalKey) {
+    return parseInt(intervalKey.substring(prefixLength), 10);
+  }
+
+  // Makes sure two arrays have the same values, account IDs.
+  function hasSameValues(ary1, ary2) {
+    if (ary1.length !== ary2.length)
+      return false;
+
+    var hasMismatch = ary1.some(function(item, i) {
+      return item !== ary2[i];
+    });
+
+    return !hasMismatch;
+  }
+
+  if (navigator.mozSetMessageHandler) {
+    navigator.mozSetMessageHandler('alarm', function onAlarm(alarm) {
+      // Do not bother with alarms that are not sync alarms.
+      var data = alarm.data;
+      if (!data || data.type !== 'sync')
+        return;
+
+      // Need to acquire the wake locks during this alarm notification
+      // turn of the event loop -- later turns are not guaranteed to
+      // be up and running. However, knowing when to release the locks
+      // is only known to the front end, so publish event about it.
+      // Need a CPU lock since otherwise the app can be paused
+      // mid-function, which could lead to unexpected behavior, and the
+      // sync should be completed as quick as possible to then close
+      // down the app.
+      // TODO: removed wifi wake lock due to network complications, to
+      // be addressed in a separate changset.
+      if (navigator.requestWakeLock) {
+        var locks = [
+          navigator.requestWakeLock('cpu')
+        ];
+
+        debug('wake locks acquired: ' + locks +
+              ' for account IDs: ' + data.accountIds);
+
+        evt.emitWhenListener('cronSyncWakeLocks',
+                             makeAccountKey(data.accountIds), locks);
+      }
+
+      dispatcher._sendMessage('alarm', [data.accountIds, data.interval]);
+    });
+  }
+
+  var dispatcher = {
+    _routeReady: false,
+    _routeQueue: [],
+    _sendMessage: function(type, args) {
+      if (this._routeReady) {
+        // sendMessage is added to routeRegistration by the main-router module.
+        routeRegistration.sendMessage(null, type, args);
+      } else {
+        this._routeQueue.push([type, args]);
+      }
+    },
+
+    /**
+     * Called by worker side to indicate it can now receive messages.
+     */
+    hello: function() {
+      this._routeReady = true;
+      if (this._routeQueue.length) {
+        var queue = this._routeQueue;
+        this._routeQueue = [];
+        queue.forEach(function(args) {
+          this._sendMessage(args[0], args[1]);
+        }.bind(this));
+      }
+    },
+
+    /**
+     * Clears all sync-based alarms. Normally not called, except perhaps for
+     * tests or debugging.
+     */
+    clearAll: function() {
+      var mozAlarms = navigator.mozAlarms;
+      if (!mozAlarms)
+        return;
+
+      var r = mozAlarms.getAll();
+
+      r.onsuccess = function(event) {
         var alarms = event.target.result;
-        for (var i = 0; i < alarms.length; i++) {
-          navigator.mozAlarms.remove(alarms[i].id);
+        if (!alarms)
+          return;
+
+        alarms.forEach(function(alarm) {
+          if (alarm.data && alarm.data.type === 'sync')
+            mozAlarms.remove(alarm.id);
+        });
+      }.bind(this);
+      r.onerror = function(err) {
+        console.error('cronsync-main clearAll mozAlarms.getAll: error: ' +
+                      err);
+      }.bind(this);
+    },
+
+    /**
+     * Makes sure there is an alarm set for every account in
+     * the list.
+     * @param  {Object} syncData. An object with keys that are
+     * 'interval' + intervalInMilliseconds, and values are arrays
+     * of account IDs that should be synced at that interval.
+     */
+    ensureSync: function (syncData) {
+      var mozAlarms = navigator.mozAlarms;
+      if (!mozAlarms)
+        return;
+
+      debug('ensureSync called');
+
+      var request = mozAlarms.getAll();
+
+      request.onsuccess = function(event) {
+        var alarms = event.target.result;
+        if (!alarms)
+          return;
+
+        // Find all IDs being tracked by alarms
+        var expiredAlarmIds = [],
+            okAlarmIntervals = {},
+            uniqueAlarms = {};
+
+        alarms.forEach(function(alarm) {
+          // Only care about sync alarms.
+          if (!alarm.data || !alarm.data.type || alarm.data.type !== 'sync')
+            return;
+
+          var intervalKey = 'interval' + alarm.data.interval,
+              wantedAccountIds = syncData[intervalKey];
+
+          if (!wantedAccountIds || !hasSameValues(wantedAccountIds,
+                                                  alarm.data.accountIds)) {
+            debug('account array mismatch, canceling existing alarm');
+            expiredAlarmIds.push(alarm.id);
+          } else {
+            // Confirm the existing alarm is still good.
+            var interval = toInterval(intervalKey),
+                now = Date.now(),
+                alarmTime = alarm.data.timestamp,
+                accountKey = makeAccountKey(wantedAccountIds);
+
+            // If the interval is nonzero, and there is no other alarm found
+            // for that account combo, and if it is not in the past and if it
+            // is not too far in the future, it is OK to keep.
+            if (interval && !uniqueAlarms.hasOwnProperty(accountKey) &&
+                alarmTime > now && alarmTime < now + interval) {
+              debug('existing alarm is OK');
+              uniqueAlarms[accountKey] = true;
+              okAlarmIntervals[intervalKey] = true;
+            } else {
+              debug('existing alarm is out of interval range, canceling');
+              expiredAlarmIds.push(alarm.id);
+            }
+          }
+        });
+
+        expiredAlarmIds.forEach(function(alarmId) {
+          mozAlarms.remove(alarmId);
+        });
+
+        var alarmMax = 0,
+            alarmCount = 0,
+            self = this;
+
+        // Called when alarms are confirmed to be set.
+        function done() {
+          alarmCount += 1;
+          if (alarmCount < alarmMax)
+            return;
+
+          // Indicate ensureSync has completed because the
+          // back end is waiting to hear alarm was set before
+          // triggering sync complete.
+          self._sendMessage('syncEnsured');
         }
 
-        debug("clearAlarms: done.");
-      };
+        Object.keys(syncData).forEach(function(intervalKey) {
+          // Skip if the existing alarm is already good.
+          if (okAlarmIntervals.hasOwnProperty(intervalKey))
+            return;
 
-      req.onerror = function(event) {
-        debug("clearAlarms: failure.");
+          var interval = toInterval(intervalKey),
+              accountIds = syncData[intervalKey],
+              date = new Date(Date.now() + interval);
+
+          // Do not set an timer for a 0 interval, bad things happen.
+          if (!interval)
+            return;
+
+          alarmMax += 1;
+
+          var alarmRequest = mozAlarms.add(date, 'ignoreTimezone',
+                                       makeData(accountIds, interval, date));
+
+          alarmRequest.onsuccess = function() {
+            debug('success: mozAlarms.add for ' + 'IDs: ' + accountIds +
+                  ' at ' + interval + 'ms');
+            done();
+          };
+
+          alarmRequest.onerror = function(err) {
+            console.error('cronsync-main mozAlarms.add for IDs: ' +
+                          accountIds +
+                          ' failed: ' + err);
+          };
+        });
+
+        // If no alarms were added, indicate ensureSync is done.
+        if (!alarmMax)
+          done();
+      }.bind(this);
+
+      request.onerror = function(err) {
+        console.error('cronsync-main ensureSync mozAlarms.getAll: error: ' +
+                      err);
       };
     }
-  }
-
-  function addAlarm(time) {
-    if (navigator.mozAlarms) {
-      var req = navigator.mozAlarms.add(time, 'ignoreTimezone', {});
-
-      req.onsuccess = function() {
-        debug('addAlarm: done.');
-      };
-
-      req.onerror = function(event) {
-        debug('addAlarm: failure.');
-
-        var target = event.target;
-        console.warn('err:', target && target.error && target.error.name);
-      };
-    }
-  }
-
-  var gApp, gIconUrl;
-  navigator.mozApps.getSelf().onsuccess = function(event) {
-    gApp = event.target.result;
-    if (gApp)
-      gIconUrl = gApp.installOrigin + '/style/icons/Email.png';
   };
 
-  /**
-   * Try and bring up the given header in the front-end.
-   *
-   * XXX currently, we just cause the app to display, but we don't do anything
-   * to cause the actual message to be displayed.  Right now, since the back-end
-   * and the front-end are in the same app, we can easily tell ourselves to do
-   * things, but in the separated future, we might want to use a webactivity,
-   * and as such we should consider using that initially too.
-   */
-  function showApp(header) {
-    gApp.launch();
-  }
-
-  function showNotification(uid, title, body) {
-    var success = function() {
-      self.sendMessage(uid, 'showNotification', true);
-    };
-
-    var close = function() {
-      self.sendMessage(uid, 'showNotification', false);
-    };
-
-    NotificationHelper.send(title, body, gIconUrl, success, close);
-  }
-
-  var self = {
-    name: 'cronsyncer',
+  var routeRegistration = {
+    name: 'cronsync',
     sendMessage: null,
-    process: function(uid, cmd, args) {
-      debug('process ' + cmd);
-      switch (cmd) {
-        case 'clearAlarms':
-          clearAlarms.apply(this, args);
-          break;
-        case 'addAlarm':
-          addAlarm.apply(this, args);
-          break;
-        case 'showNotification':
-          args.unshift(uid);
-          showNotification.apply(this, args);
-          break;
-        case 'showApp':
-          showApp.apply(this, args);
-          break;
-      }
-    }
+    dispatch: dispatcher
   };
-  return self;
+
+  return routeRegistration;
 });
 
 define('mailapi/worker-support/devicestorage-main',[],function() {
@@ -2838,6 +4319,7 @@ define('mailapi/worker-support/devicestorage-main',[],function() {
     dump('DeviceStorage: ' + str + '\n');
   }
 
+
   function save(uid, cmd, storage, blob, filename) {
     var deviceStorage = navigator.getDeviceStorage(storage);
     var req = deviceStorage.addNamed(blob, filename);
@@ -2846,8 +4328,15 @@ define('mailapi/worker-support/devicestorage-main',[],function() {
       self.sendMessage(uid, cmd, [false, req.error.name]);
     };
 
-    req.onsuccess = function() {
-      self.sendMessage(uid, cmd, [true]);
+    req.onsuccess = function(e) {
+      var prefix = '';
+
+      if (typeof window.IS_GELAM_TEST !== 'undefined') {
+        prefix = 'TEST_PREFIX/';
+      }
+
+      // Bool success, String err, String filename
+      self.sendMessage(uid, cmd, [true, null, prefix + e.target.result]);
     };
   }
 
@@ -2886,7 +4375,10 @@ define('mailapi/worker-support/maildb-main',[],function() {
     args.push(function() {
       self.sendMessage(uid, cmd, Array.prototype.slice.call(arguments));
     });
-    db[cmd].apply(db, args);
+    if (!db._db)
+      console.warn('trying to call', cmd, 'on apparently dead db. skipping.');
+    else
+      db[cmd].apply(db, args);
   }
 
   var self = {
@@ -2922,13 +4414,24 @@ if (("indexedDB" in window) && window.indexedDB) {
  *
  * Explanation of most recent bump:
  *
+ * Bumping to 22 because of account changes around cronsyncing, an "undefined"
+ * error with summaries and some constant changes.
+ *
+ * Bumping to 21 because of massive error in partial fetching merges.
+ *
+ * Bumping to 20 because of block sizing changes.
+ *
+ * Bumping to 19 because of change from uids to ids, but mainly because we are
+ * now doing parallel IMAP fetching and we want to see the results of using it
+ * immediately.
+ *
  * Bumping to 18 because of massive change for lazily fetching snippets and
  * message bodies.
  *
  * Bumping to 17 because we changed the folder representation to store
  * hierarchy.
  */
-var CUR_VERSION = 18;
+var CUR_VERSION = 22;
 
 /**
  * What is the lowest database version that we are capable of performing a
@@ -3084,6 +4587,8 @@ function MailDB(testOptions, successCb, errorCb, upgradeCb) {
   };
 
   var dbVersion = CUR_VERSION;
+  if (testOptions && testOptions.dbDelta)
+    dbVersion += testOptions.dbDelta;
   if (testOptions && testOptions.dbVersion)
     dbVersion = testOptions.dbVersion;
   var openRequest = IndexedDB.open('b2g-email', dbVersion), self = this;
@@ -3093,6 +4598,7 @@ function MailDB(testOptions, successCb, errorCb, upgradeCb) {
     successCb();
   };
   openRequest.onupgradeneeded = function(event) {
+    console.log('MailDB in onupgradeneeded');
     var db = openRequest.result;
 
     // - reset to clean slate
@@ -3144,8 +4650,9 @@ MailDB.prototype = {
     }
   },
 
-  getConfig: function(callback) {
-    var transaction = this._db.transaction([TBL_CONFIG, TBL_FOLDER_INFO],
+  getConfig: function(callback, trans) {
+    var transaction = trans ||
+                      this._db.transaction([TBL_CONFIG, TBL_FOLDER_INFO],
                                            'readonly');
     var configStore = transaction.objectStore(TBL_CONFIG),
         folderInfoStore = transaction.objectStore(TBL_FOLDER_INFO);
@@ -3262,8 +4769,45 @@ MailDB.prototype = {
                                       TBL_BODY_BLOCKS], 'readwrite');
     trans.onerror = this._fatalError;
     trans.objectStore(TBL_FOLDER_INFO).put(folderInfo, accountId);
+
     var headerStore = trans.objectStore(TBL_HEADER_BLOCKS),
-        bodyStore = trans.objectStore(TBL_BODY_BLOCKS), i;
+        bodyStore = trans.objectStore(TBL_BODY_BLOCKS),
+        i;
+
+    /**
+     * Calling put/delete on operations can be fairly expensive for these blocks
+     * (4-10ms+) which can cause major jerk while scrolling to we send block
+     * operations individually (but inside of a single block) to improve
+     * responsiveness at the cost of throughput.
+     */
+    var operationQueue = [];
+
+    function addToQueue() {
+      var args = Array.slice(arguments);
+      var store = args.shift();
+      var type = args.shift();
+
+      operationQueue.push({
+        store: store,
+        type: type,
+        args: args
+      });
+    }
+
+    function workQueue() {
+      var pendingRequest = operationQueue.shift();
+
+      // no more the transition complete handles the callback
+      if (!pendingRequest)
+        return;
+
+      var store = pendingRequest.store;
+      var type = pendingRequest.type;
+
+      var request = store[type].apply(store, pendingRequest.args);
+
+      request.onsuccess = request.onerror = workQueue;
+    }
 
     for (i = 0; i < perFolderStuff.length; i++) {
       var pfs = perFolderStuff[i], block;
@@ -3271,17 +4815,17 @@ MailDB.prototype = {
       for (var headerBlockId in pfs.headerBlocks) {
         block = pfs.headerBlocks[headerBlockId];
         if (block)
-          headerStore.put(block, pfs.id + ':' + headerBlockId);
+          addToQueue(headerStore, 'put', block, pfs.id + ':' + headerBlockId);
         else
-          headerStore.delete(pfs.id + ':' + headerBlockId);
+          addToQueue(headerStore, 'delete', pfs.id + ':' + headerBlockId);
       }
 
       for (var bodyBlockId in pfs.bodyBlocks) {
         block = pfs.bodyBlocks[bodyBlockId];
         if (block)
-          bodyStore.put(block, pfs.id + ':' + bodyBlockId);
+          addToQueue(bodyStore, 'put', block, pfs.id + ':' + bodyBlockId);
         else
-          bodyStore.delete(pfs.id + ':' + bodyBlockId);
+          addToQueue(bodyStore, 'delete', pfs.id + ':' + bodyBlockId);
       }
     }
 
@@ -3291,8 +4835,8 @@ MailDB.prototype = {
             range = IDBKeyRange.bound(folderId + ':',
                                       folderId + ':\ufff0',
                                       false, false);
-        headerStore.delete(range);
-        bodyStore.delete(range);
+        addToQueue(headerStore, 'delete', range);
+        addToQueue(bodyStore, 'delete', range);
       }
     }
 
@@ -3301,6 +4845,8 @@ MailDB.prototype = {
         callback();
       });
     }
+
+    workQueue();
 
     return trans;
   },
@@ -3327,104 +4873,309 @@ MailDB.prototype = {
 return self;
 });
 
-define('mailapi/worker-support/net-main',[],function() {
-  'use strict';
+define('mailapi/async_blob_fetcher',
+  [
+    'exports'
+  ],
+  function(
+    exports
+  ) {
 
-  function debug(str) {
-    //dump('NetSocket: ' + str + '\n');
-  }
-
-  // Maintain a list of active sockets
-  var socks = {};
-
-  function open(uid, host, port, options) {
-    var socket = navigator.mozTCPSocket;
-    var sock = socks[uid] = socket.open(host, port, options);
-
-    sock.onopen = function(evt) {
-      //debug('onopen ' + uid + ": " + evt.data.toString());
-      self.sendMessage(uid, 'onopen');
-    };
-
-    sock.onerror = function(evt) {
-      //debug('onerror ' + uid + ": " + new Uint8Array(evt.data));
-      var err = evt.data;
-      var wrappedErr;
-      if (err && typeof(err) === 'object') {
-        wrappedErr = {
-          name: err.name,
-          message: err.message
-        };
-        // Propagate the SSL error detecting heuristic used elsewhere.  This is
-        // an XPCOM interface that we do not expect to structured clone across
-        // so well.
-        if ('isNotValidAtThisTime' in err) {
-          wrappedErr.isNotValidAtThisTime = err.isNotValidAtThisTime;
-        }
-      }
-      else {
-        wrappedErr = err;
-      }
-      self.sendMessage(uid, 'onerror', wrappedErr);
-    };
-
-    sock.ondata = function(evt) {
-      /*
-      try {
-        var str = '';
-        for (var i = 0; i < evt.data.byteLength; i++) {
-          str += String.fromCharCode(evt.data[i]);
-        }
-        debug(str + '\n');
-      } catch(e) {}
-      debug('ondata ' + uid + ": " + new Uint8Array(evt.data));
-      */
-      // XXX why are we doing this? ask Vivien or try to remove...
-      self.sendMessage(uid, 'ondata', new Uint8Array(evt.data));
-    };
-
-    sock.onclose = function(evt) {
-      //debug('onclose ' + uid + ": " + evt.data.toString());
-      self.sendMessage(uid, 'onclose');
-    };
-  }
-
-  function close(uid) {
-    var sock = socks[uid];
-    if (!sock)
+/**
+ * Asynchronously fetch the contents of a Blob, returning a Uint8Array.
+ * Exists because there is no FileReader in Gecko workers and this totally
+ * works.  In discussion, it sounds like :sicking wants to deprecate the
+ * FileReader API anyways.
+ *
+ * Our consumer in this case is our specialized base64 encode that wants a
+ * Uint8Array since that is more compactly represented than a binary string
+ * would be.
+ *
+ * @param blob {Blob}
+ * @param callback {Function(err, Uint8Array)}
+ */
+function asyncFetchBlobAsUint8Array(blob, callback) {
+  var blobUrl = URL.createObjectURL(blob);
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', blobUrl, true);
+  xhr.responseType = 'arraybuffer';
+  xhr.onload = function() {
+    // blobs currently result in a status of 0 since there is no server.
+    if (xhr.status !== 0 && (xhr.status < 200 || xhr.status >= 300)) {
+      callback(xhr.status);
       return;
-    sock.close();
-    sock.onopen = null;
-    sock.onerror = null;
-    sock.ondata = null;
-    sock.onclose = null;
-    delete socks[uid];
+    }
+    callback(null, new Uint8Array(xhr.response));
+  };
+  xhr.onerror = function() {
+    callback('error');
+  };
+  try {
+    xhr.send();
   }
-
-  function write(uid, data) {
-    // XXX why are we doing this? ask Vivien or try to remove...
-    socks[uid].send(new Uint8Array(data));
+  catch(ex) {
+    console.error('XHR send() failure on blob');
+    callback('error');
   }
+  URL.revokeObjectURL(blobUrl);
+}
 
-  var self = {
-    name: 'netsocket',
-    sendMessage: null,
-    process: function(uid, cmd, args) {
-      debug('process ' + cmd);
-      switch (cmd) {
-        case 'open':
-          open(uid, args[0], args[1], args[2]);
-          break;
-        case 'close':
-          close(uid);
-          break;
-        case 'write':
-          write(uid, args[0]);
-          break;
-      }
+return {
+  asyncFetchBlobAsUint8Array: asyncFetchBlobAsUint8Array
+};
+
+}); // end define
+;
+/**
+ * The main-thread counterpart to our node-net.js wrapper.
+ *
+ * Provides the smarts for streaming the content of blobs.  An alternate
+ * implementation would be to provide a decorating proxy to implement this
+ * since smart Blob transmission is on the W3C raw-socket hit-list (see
+ * http://www.w3.org/2012/sysapps/raw-sockets/), but we're already acting like
+ * node.js's net implementation on the other side of the equation and a totally
+ * realistic implementation is more work and complexity than our needs require.
+ *
+ * Important implementation notes that affect us:
+ *
+ * - mozTCPSocket generates ondrain notifications when the send buffer is
+ *   completely empty, not when when we go below the target buffer level.
+ *
+ * - bufferedAmount in the child process mozTCPSocket implementation only gets
+ *   updated when the parent process relays a messages to the child process.
+ *   When we are performing bulks sends, this means we will only see
+ *   bufferedAmount go down when we receive an 'ondrain' notification and the
+ *   buffer has hit zero.  As such, trying to do anything clever involving
+ *   bufferedAmount other than seeing if it's at zero is not going to do
+ *   anything useful.
+ *
+ * Leading to our strategy:
+ *
+ * - Always have a pre-fetched block of disk I/O to hand to the socket when we
+ *   get a drain event so that disk I/O does not stall our pipeline.
+ *   (Obviously, if the network is faster than our disk, there is very little
+ *   we can do.)
+ *
+ * - Pick a page-size so that in the case where the network is extremely fast
+ *   we are able to maintain good throughput even when our IPC overhead
+ *   dominates.  We just pick one page-size; we intentionally avoid any
+ *   excessively clever buffering regimes because those could back-fire and
+ *   such effort is better spent on enhancing TCPSocket.
+ */
+define('mailapi/worker-support/net-main',['require','mailapi/async_blob_fetcher'],function(require) {
+'use strict';
+
+var asyncFetchBlobAsUint8Array =
+      require('mailapi/async_blob_fetcher').asyncFetchBlobAsUint8Array;
+
+// Active sockets
+var sockInfoByUID = {};
+
+function open(uid, host, port, options) {
+  var socket = navigator.mozTCPSocket;
+  var sock = socket.open(host, port, options);
+
+  var sockInfo = sockInfoByUID[uid] = {
+    uid: uid,
+    sock: sock,
+    // Are we in the process of sending a blob?  The blob if so.
+    activeBlob: null,
+    // Current offset into the blob, if any
+    blobOffset: 0,
+    queuedData: null,
+    // Queued write() calls that are ordering dependent on the Blob being
+    // fully sent first.
+    backlog: [],
+  };
+
+  sock.onopen = function(evt) {
+    self.sendMessage(uid, 'onopen');
+  };
+
+  sock.onerror = function(evt) {
+    var err = evt.data;
+    var wrappedErr;
+    if (err && typeof(err) === 'object') {
+      wrappedErr = {
+        name: err.name,
+        type: err.type,
+        message: err.message
+      };
+    }
+    else {
+      wrappedErr = err;
+    }
+    self.sendMessage(uid, 'onerror', wrappedErr);
+  };
+
+  sock.ondata = function(evt) {
+    var buf = evt.data;
+    self.sendMessage(uid, 'ondata', buf, [buf]);
+  };
+
+  sock.ondrain = function(evt) {
+    // If we have an activeBlob and data already to send, then send it.
+    // If we have an activeBlob but no data, then fetchNextBlobChunk has
+    // an outstanding chunk fetch and it will issue the write directly.
+    if (sockInfo.activeBlob && sockInfo.queuedData) {
+      console.log('net-main(' + sockInfo.uid + '): Socket drained, sending.');
+      sock.send(sockInfo.queuedData.buffer, 0, sockInfo.queuedData.byteLength);
+      sockInfo.queuedData = null;
+      // fetch the next chunk or close out the blob; this method does both
+      fetchNextBlobChunk(sockInfo);
     }
   };
-  return self;
+
+  sock.onclose = function(evt) {
+    self.sendMessage(uid, 'onclose');
+  };
+}
+
+function beginBlobSend(sockInfo, blob) {
+  console.log('net-main(' + sockInfo.uid + '): Blob send of', blob.size,
+              'bytes');
+  sockInfo.activeBlob = blob;
+  sockInfo.blobOffset = 0;
+  sockInfo.queuedData = null;
+  fetchNextBlobChunk(sockInfo);
+}
+
+/**
+ * Fetch the next portion of the Blob we are currently sending.  Once the read
+ * completes we will either send the data immediately if the socket's buffer is
+ * empty or queue it up for sending once the buffer does drain.
+ *
+ * This logic is used both in the starting case and to help us reach a steady
+ * state where (ideally) we always have a pre-fetched buffer of data ready for
+ * when we hear the next drain event.
+ *
+ * We are also responsible for noticing that we're all done sending the Blob.
+ */
+function fetchNextBlobChunk(sockInfo) {
+  // We are all done if the next fetch would be beyond the end of the blob
+  if (sockInfo.blobOffset >= sockInfo.activeBlob.size) {
+    console.log('net-main(' + sockInfo.uid + '): Blob send completed.',
+                'backlog length:', sockInfo.backlog.length);
+    sockInfo.activeBlob = null;
+
+    // Drain as much of the backlog as possible.
+    var backlog = sockInfo.backlog;
+    while (backlog.length) {
+      var sendArgs = backlog.shift();
+      var data = sendArgs[0];
+      if (data instanceof Blob) {
+        beginBlobSend(sockInfo, data);
+        return;
+      }
+      sockInfo.sock.send(data, sendArgs[1], sendArgs[2]);
+    }
+    // (the backlog is now empty)
+    return;
+  }
+
+  var nextOffset =
+        Math.min(sockInfo.blobOffset + self.BLOB_BLOCK_READ_SIZE,
+                 sockInfo.activeBlob.size);
+  console.log('net-main(' + sockInfo.uid + '): Fetching bytes',
+              sockInfo.blobOffset, 'through', nextOffset, 'of',
+              sockInfo.activeBlob.size);
+  var blobSlice = sockInfo.activeBlob.slice(
+                    sockInfo.blobOffset,
+                    nextOffset);
+  sockInfo.blobOffset = nextOffset;
+
+  function gotChunk(err, binaryDataU8) {
+    console.log('net-main(' + sockInfo.uid + '): Retrieved chunk');
+    if (err) {
+      // I/O errors are fatal to the connection; our abstraction does not let us
+      // bubble the error.  The good news is that errors are highly unlikely.
+      sockInfo.sock.close();
+      return;
+    }
+
+    // If the socket has already drained its buffer, then just send the data
+    // right away and re-schedule ourselves.
+    if (sockInfo.sock.bufferedAmount === 0) {
+      console.log('net-main(' + sockInfo.uid + '): Sending chunk immediately.');
+      sockInfo.sock.send(binaryDataU8.buffer, 0, binaryDataU8.byteLength);
+      fetchNextBlobChunk(sockInfo);
+      return;
+    }
+
+    sockInfo.queuedData = binaryDataU8;
+  };
+  asyncFetchBlobAsUint8Array(blobSlice, gotChunk);
+}
+
+function close(uid) {
+  var sockInfo = sockInfoByUID[uid];
+  if (!sockInfo)
+    return;
+  var sock = sockInfo.sock;
+  sock.close();
+  sock.onopen = null;
+  sock.onerror = null;
+  sock.ondata = null;
+  sock.ondrain = null;
+  sock.onclose = null;
+  delete sockInfoByUID[uid];
+}
+
+function write(uid, data, offset, length) {
+  var sockInfo = sockInfoByUID[uid];
+
+  // If there is an activeBlob, then the write must be queued or we would end up
+  // mixing this write in with our Blob and that would be embarassing.
+  if (sockInfo.activeBlob) {
+    sockInfo.backlog.push([data, offset, length]);
+    return;
+  }
+
+  if (data instanceof Blob) {
+    beginBlobSend(sockInfo, data);
+  }
+  else {
+    sockInfo.sock.send(data, offset, length);
+  }
+}
+
+
+function upgradeToSecure(uid) {
+  var sockInfo = sockInfoByUID[uid];
+  if (!sockInfo)
+    return;
+  sockInfo.sock.upgradeToSecure();
+}
+
+
+var self = {
+  name: 'netsocket',
+  sendMessage: null,
+
+  /**
+   * What size bites (in bytes) should we take of the Blob for streaming
+   * purposes?  See the file header for the sizing rationale.
+   */
+  BLOB_BLOCK_READ_SIZE: 96 * 1024,
+
+  process: function(uid, cmd, args) {
+    switch (cmd) {
+      case 'open':
+        open(uid, args[0], args[1], args[2]);
+        break;
+      case 'close':
+        close(uid);
+        break;
+      case 'write':
+        write(uid, args[0], args[1], args[2]);
+        break;
+      case 'upgradeToSecure':
+        upgradeToSecure(uid);
+        break;
+    }
+  }
+};
+return self;
 });
 
 /**
@@ -3470,29 +5221,12 @@ define('mailapi/main-frame-setup',
     $net
   ) {
 
-  var worker;
-  function init() {
-    worker = new Worker('js/ext/mailapi/worker-bootstrap.js');
-
-    $router.useWorker(worker);
-
-    $router.register(control);
-    $router.register(bridge);
-    $router.register($configparser);
-    $router.register($cronsync);
-    $router.register($devicestorage);
-    $router.register($maildb);
-    $router.register($net);
-  }
-
   var control = {
     name: 'control',
     sendMessage: null,
     process: function(uid, cmd, args) {
       var online = navigator.onLine;
-      var hasPendingAlarm = navigator.mozHasPendingMessage &&
-                            navigator.mozHasPendingMessage('alarm');
-      control.sendMessage(uid, 'hello', [online, hasPendingAlarm]);
+      control.sendMessage(uid, 'hello', [online]);
 
       window.addEventListener('online', function(evt) {
         control.sendMessage(uid, evt.type, [true]);
@@ -3500,18 +5234,13 @@ define('mailapi/main-frame-setup',
       window.addEventListener('offline', function(evt) {
         control.sendMessage(uid, evt.type, [false]);
       });
-      if (navigator.mozSetMessageHandler) {
-        navigator.mozSetMessageHandler('alarm', function(msg) {
-          control.sendMessage(uid, 'alarm', [msg]);
-        });
-      }
 
       $router.unregister(control);
     },
   };
 
+  var MailAPI = new $mailapi.MailAPI();
 
-  var mailAPI;
   var bridge = {
     name: 'bridge',
     sendMessage: null,
@@ -3519,8 +5248,8 @@ define('mailapi/main-frame-setup',
       var msg = args;
 
       if (msg.type === 'hello') {
-        mailAPI = new $mailapi.MailAPI();
-        mailAPI.__bridgeSend = function(msg) {
+        delete MailAPI._fake;
+        MailAPI.__bridgeSend = function(msg) {
           worker.postMessage({
             uid: uid,
             type: 'bridge',
@@ -3528,18 +5257,30 @@ define('mailapi/main-frame-setup',
           });
         };
 
-        mailAPI.config = msg.config;
+        MailAPI.config = msg.config;
 
-        var evtObject = document.createEvent('Event');
-        evtObject.initEvent('mailapi', false, false);
-        evtObject.mailAPI = mailAPI;
-        window.dispatchEvent(evtObject);
+        // Send up all the queued messages to real backend now.
+        MailAPI._storedSends.forEach(function (msg) {
+          MailAPI.__bridgeSend(msg);
+        });
+        MailAPI._storedSends = [];
       } else {
-        mailAPI.__bridgeReceive(msg);
+        MailAPI.__bridgeReceive(msg);
       }
     },
   };
 
-  init();
+  // Wire up the worker to the router
+  var worker = new Worker('js/ext/mailapi/worker-bootstrap.js');
+  $router.useWorker(worker);
+  $router.register(control);
+  $router.register(bridge);
+  $router.register($configparser);
+  $router.register($cronsync);
+  $router.register($devicestorage);
+  $router.register($maildb);
+  $router.register($net);
+
+  return MailAPI;
 }); // end define
 ;

@@ -13,9 +13,15 @@ var AppManager = {
     UIManager.init();
     Navigation.init();
     DataMobile.init();
+    VariantManager.init();
     var kSplashTimeout = 700;
     // Retrieve mobile connection if available
-    var conn = window.navigator.mozMobileConnection;
+    // XXX: check bug-926169
+    // this is used to keep all tests passing while introducing multi-sim APIs
+    var conn = window.navigator.mozMobileConnection ||
+               window.navigator.mozMobileConnections &&
+               window.navigator.mozMobileConnections[0];
+
     if (!conn) {
       setTimeout(function() {
         // For desktop
@@ -32,7 +38,6 @@ var AppManager = {
     setTimeout(function() {
       // TODO Include VIVO SIM Card management
       // https://bugzilla.mozilla.org/show_bug.cgi?id=801269#c6
-      var self = this;
       Navigation.manageStep();
       UIManager.activationScreen.classList.add('show');
       // Remove the splash

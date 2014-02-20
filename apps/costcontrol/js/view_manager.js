@@ -90,7 +90,14 @@ var ViewManager = (function() {
     if (callback) {
       callback(isTab, viewId, isTab ? currentViewId : previousViewId);
     }
+    notifyViewChange(isTab, viewId);
   };
+
+  function notifyViewChange(isTab, current) {
+    var type = isTab ? 'tabchanged' : 'viewchanged';
+    var event = new CustomEvent(type, { detail: current });
+    window.dispatchEvent(event);
+  }
 
   ViewManager.prototype.loadPanel = function _loadPanel(panel) {
     if (!panel || panel.hidden === false) return;
@@ -98,6 +105,9 @@ var ViewManager = (function() {
     // apply the HTML markup stored in the first comment node
     for (var i = 0; i < panel.childNodes.length; i++) {
       if (panel.childNodes[i].nodeType == document.COMMENT_NODE) {
+        // XXX: Note we use innerHTML precisely because we need to parse the
+        // content and we want to avoid overhead introduced by DOM
+        // manipulations.
         panel.innerHTML = panel.childNodes[i].nodeValue;
         break;
       }

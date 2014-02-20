@@ -1,8 +1,44 @@
 
 /**
- * Make our TCPSocket implementation look like node's net library.
+ * Remoted network API that tries to look like node.js's "net" API.  We are
+ * expected/required to run in a worker thread where we don't have direct
+ * access to mozTCPSocket so everything has to get remitted to the main thread.
+ * Our counterpart is mailapi/worker-support/net-main.js
  *
- * We make sure to support:
+ *
+ * ## Sending lots of data: flow control, Blobs ##
+ *
+ * mozTCPSocket provides a flow-control mechanism (the return value to send
+ * indicates whether we've crossed a buffering boundary and 'ondrain' tells us
+ * when all buffered data has been sent), but does not yet support enqueueing
+ * Blobs for processing (which is part of the proposed standard at
+ * http://www.w3.org/2012/sysapps/raw-sockets/).  Also, the raw-sockets spec
+ * calls for generating the 'drain' event once our buffered amount goes back
+ * under the internal buffer target rather than waiting for it to hit zero like
+ * mozTCPSocket.
+ *
+ * Our main desire right now for flow-control is to avoid using a lot of memory
+ * and getting killed by the OOM-killer.  As such, flow control is not important
+ * to us if we're just sending something that we're already keeping in memory.
+ * The things that will kill us are giant things like attachments (or message
+ * bodies we are quoting/repeating, potentially) that we are keeping as Blobs.
+ *
+ * As such, rather than echoing the flow-control mechanisms over to this worker
+ * context, we just allow ourselves to write() a Blob and have the net-main.js
+ * side take care of streaming the Blobs over the network.
+ *
+ * Note that successfully sending a lot of data may entail holding a wake-lock
+ * to avoid having the network device we are using turned off in the middle of
+ * our sending.  The network-connection abstraction is not currently directly
+ * involved with the wake-lock management, but I could see it needing to beef up
+ * its error inference in terms of timeouts/detecting disconnections so we can
+ * avoid grabbing a wi-fi wake-lock, having our connection quietly die, and then
+ * we keep holding the wi-fi wake-lock for much longer than we should.
+ *
+ * ## Supported API Surface ##
+ *
+ * We make sure to expose the following subset of the node.js API because we
+ * have consumers that get upset if these do not exist:
  *
  * Attributes:
  * - encrypted (false, this is not the tls byproduct)
@@ -45,7 +81,13 @@ function NetSocket(port, host, crypto) {
   this._sendMessage = routerInfo.sendMessage;
   this._unregisterWithRouter = routerInfo.unregister;
 
-  var args = [host, port, { useSSL: crypto, binaryType: 'arraybuffer' }];
+  var args = [host, port,
+              {
+                // Bug 784816 is changing useSSL into useSecureTransport for
+                // spec compliance.  Use both during the transition period.
+                useSSL: crypto, useSecureTransport: crypto,
+                binaryType: 'arraybuffer'
+              }];
   this._sendMessage('open', args);
 
   EventEmitter.call(this);
@@ -58,8 +100,43 @@ NetSocket.prototype.setTimeout = function() {
 };
 NetSocket.prototype.setKeepAlive = function(shouldKeepAlive) {
 };
-NetSocket.prototype.write = function(buffer) {
-  this._sendMessage('write', [buffer]);
+// The semantics of node.js's socket.write does not take ownership and that's
+// how our code uses it, so we can't use transferrables by default.  However,
+// there is an optimization we want to perform related to Uint8Array.subarray().
+//
+// All the subarray does is create a view on the underlying buffer.  This is
+// important and notable because the structured clone implementation for typed
+// arrays and array buffers is *not* clever; it just serializes the entire
+// underlying buffer and the typed array as a view on that.  (This does have
+// the upside that you can transfer a whole bunch of typed arrays and only one
+// copy of the buffer.)  The good news is that ArrayBuffer.slice() does create
+// an entirely new copy of the buffer, so that works with our semantics and we
+// can use that to transfer only what needs to be transferred.
+NetSocket.prototype.write = function(u8array) {
+  if (u8array instanceof Blob) {
+    // We always send blobs in their entirety; you should slice the blob and
+    // give us that if that's what you want.
+    this._sendMessage('write', [u8array]);
+    return;
+  }
+
+  var sendArgs;
+  // Slice the underlying buffer and transfer it if the array is a subarray
+  if (u8array.byteOffset !== 0 ||
+      u8array.length !== u8array.buffer.byteLength) {
+    var buf = u8array.buffer.slice(u8array.byteOffset,
+                                   u8array.byteOffset + u8array.length);
+    this._sendMessage('write',
+                      [buf, 0, buf.byteLength],
+                      [buf]);
+  }
+  else {
+    this._sendMessage('write',
+                      [u8array.buffer, u8array.byteOffset, u8array.length]);
+  }
+};
+NetSocket.prototype.upgradeToSecure = function() {
+  this._sendMessage('upgradeToSecure', []);
 };
 NetSocket.prototype.end = function() {
   if (this.destroyed)
@@ -84,8 +161,8 @@ NetSocket.prototype._onclose = function() {
   this.emit('end');
 };
 
-exports.connect = function(port, host) {
-  return new NetSocket(port, host, false);
+exports.connect = function(port, host, crypto) {
+  return new NetSocket(port, host, !!crypto);
 };
 
 }); // end define
@@ -132,124 +209,10 @@ exports.getHostname = exports.hostname;
 
 }); // end define
 ;
-define('simplesmtp/lib/starttls',['require','exports','module','crypto','tls'],function (require, exports, module) {
-// SOURCE: https://gist.github.com/848444
-
-// Target API:
-//
-//  var s = require('net').createStream(25, 'smtp.example.com');
-//  s.on('connect', function() {
-//   require('starttls')(s, options, function() {
-//      if (!s.authorized) {
-//        s.destroy();
-//        return;
-//      }
-//
-//      s.end("hello world\n");
-//    });
-//  });
-//
-//
-
-/**
- * @namespace Client STARTTLS module
- * @name starttls
- */
-module.exports.starttls = starttls;
-
-/**
- * <p>Upgrades a socket to a secure TLS connection</p>
- * 
- * @memberOf starttls
- * @param {Object} socket Plaintext socket to be upgraded
- * @param {Function} callback Callback function to be run after upgrade
- */
-function starttls(socket, callback) {
-    var sslcontext, pair, cleartext;
-    
-    socket.removeAllListeners("data");
-    sslcontext = require('crypto').createCredentials();
-    pair = require('tls').createSecurePair(sslcontext, false);
-    cleartext = pipe(pair, socket);
-
-    pair.on('secure', function() {
-        var verifyError = (pair._ssl || pair.ssl).verifyError();
-
-        if (verifyError) {
-            cleartext.authorized = false;
-            cleartext.authorizationError = verifyError;
-        } else {
-            cleartext.authorized = true;
-        }
-
-        callback(cleartext);
-    });
-
-    cleartext._controlReleased = true;
-    return pair;
-}
-
-function forwardEvents(events, emitterSource, emitterDestination) {
-    var map = [], name, handler;
-    
-    for(var i = 0, len = events.length; i < len; i++) {
-        name = events[i];
-
-        handler = forwardEvent.bind(emitterDestination, name);
-        
-        map.push(name);
-        emitterSource.on(name, handler);
-    }
-    
-    return map;
-}
-
-function forwardEvent() {
-    this.emit.apply(this, arguments);
-}
-
-function removeEvents(map, emitterSource) {
-    for(var i = 0, len = map.length; i < len; i++){
-        emitterSource.removeAllListeners(map[i]);
-    }
-}
-
-function pipe(pair, socket) {
-    pair.encrypted.pipe(socket);
-    socket.pipe(pair.encrypted);
-
-    pair.fd = socket.fd;
-    
-    var cleartext = pair.cleartext;
-  
-    cleartext.socket = socket;
-    cleartext.encrypted = pair.encrypted;
-    cleartext.authorized = false;
-
-    function onerror(e) {
-        if (cleartext._controlReleased) {
-            cleartext.emit('error', e);
-        }
-    }
-
-    var map = forwardEvents(["timeout", "end", "close", "drain", "error"], socket, cleartext);
-  
-    function onclose() {
-        socket.removeListener('error', onerror);
-        socket.removeListener('close', onclose);
-        removeEvents(map,socket);
-    }
-
-    socket.on('error', onerror);
-    socket.on('close', onclose);
-
-    return cleartext;
-}
-});
 define('xoauth2',['require','exports','module'],function(require, exports, module) {
 });
 
-define('simplesmtp/lib/client',['require','exports','module','stream','util','net','tls','os','./starttls','xoauth2','crypto'],function (require, exports, module) {
+define('simplesmtp/lib/client',['require','exports','module','stream','util','net','tls','os','xoauth2','crypto'],function (require, exports, module) {
 // TODO:
 // * Lisada timeout serveri ühenduse jaoks
 
@@ -258,7 +221,6 @@ var Stream = require('stream').Stream,
     net = require('net'),
     tls = require('tls'),
     oslib = require('os'),
-    starttls = require('./starttls').starttls,
     xoauth2 = require('xoauth2'),
     crypto = require('crypto');
 
@@ -283,10 +245,11 @@ module.exports = function(port, host, options){
  * 
  * <p>Optional options object takes the following possible properties:</p>
  * <ul>
- *     <li><b>secureConnection</b> - use SSL</li>
  *     <li><b>name</b> - the name of the client server</li>
  *     <li><b>auth</b> - authentication object <code>{user:"...", pass:"..."}</code>
- *     <li><b>ignoreTLS</b> - ignore server support for STARTTLS</li>
+ *     <li><b>crypto</b> - type of server connection.
+ *        "plain"/false, "ssl"/true, or "starttls".
+ *     </li>
  *     <li><b>debug</b> - output client and server messages to console</li>
  *     <li><b>instanceId</b> - unique instance id for debugging</li>
  * </ul>
@@ -303,11 +266,18 @@ function SMTPClient(port, host, options){
     this.readable = true;
     
     this.options = options || {};
-    
-    this.port = port || (this.options.secureConnection ? 465 : 25);
+  
+    var VALID_CRYPTO = ['plain', 'ssl', 'starttls'];
+  
+    if (this.options.crypto === true) {
+        this.options.crypto = 'ssl';
+    } else if (this.options.crypto === false) {
+        this.options.crypto = 'plain';
+    }
+  
+    this.port = port || (this.options.crypto === 'ssl' ? 465 : 25);
     this.host = host || "localhost";
     
-    this.options.secureConnection = !!this.options.secureConnection;
     this.options.auth = this.options.auth || false;
     this.options.maxConnections = this.options.maxConnections || 5;
     
@@ -388,8 +358,10 @@ SMTPClient.prototype._init = function(){
      * @private
      */
     this._currentAction = false;
-    
-    if(this.options.ignoreTLS || this.options.secureConnection){
+  
+    // in plain or ssl mode, do not attempt to upgrade encryption at the
+    // protocol layer because it's handled automatically.
+    if(this.options.crypto === 'plain' || this.options.crypto === 'ssl') {
         this._secureMode = true;
     }
 
@@ -415,7 +387,7 @@ SMTPClient.prototype._init = function(){
  */
 SMTPClient.prototype.connect = function(){
 
-    if(this.options.secureConnection){
+    if(this.options.crypto === 'ssl') {
         this.socket = tls.connect(this.port, this.host, {}, this._onConnect.bind(this));
     }else{
         this.socket = net.connect(this.port, this.host);
@@ -432,15 +404,9 @@ SMTPClient.prototype.connect = function(){
  *        has been secured
  */
 SMTPClient.prototype._upgradeConnection = function(callback){
-    this._ignoreData = true;
-    starttls(this.socket, (function(socket){
-        this.socket = socket;
-        this._ignoreData = false;
-        this._secureMode = true;
-        this.socket.on("data", this._onData.bind(this));
-            
-        return callback(null, true);
-    }).bind(this));
+    this._secureMode = true;
+    this.socket.upgradeToSecure();
+    callback(null, true);
 };
 
 /**
@@ -778,14 +744,24 @@ SMTPClient.prototype._actionGreeting = function(str){
  */
 SMTPClient.prototype._actionEHLO = function(str){
     if(str.charAt(0) != "2"){
+        // This is a security failure if we want to perform a startTLS upgrade
+        if (!this._secureMode && this.options.crypto === 'starttls') {
+            this._onError(new Error("No EHLO support means no STARTTLS"),
+                          "SecurityError");
+            return;
+        }
+
         // Try HELO instead
         this._currentAction = this._actionHELO;
         this.sendCommand("HELO "+this.options.name);
         return;
     }
-    
-    // Detect if the server supports STARTTLS
-    if(!this._secureMode && str.match(/[ \-]STARTTLS\r?$/mi)){
+
+    // If this is a STARTTLS connection, always attempt a STARTTLS upgrade.
+    // This differs from upstream's behavior, in which a connection
+    // requesting STARTTLS will downgrade to 'plain' if the server does
+    // not support STARTTLS. We want to err on the side of security instead.
+    if (!this._secureMode && this.options.crypto === 'starttls') {
         this.sendCommand("STARTTLS");
         this._currentAction = this._actionSTARTTLS;
         return; 
@@ -841,10 +817,9 @@ SMTPClient.prototype._actionHELO = function(str){
  * @param {String} str Message from the server
  */
 SMTPClient.prototype._actionSTARTTLS = function(str){
-    if(str.charAt(0) != "2"){
-        // Try HELO instead
-        this._currentAction = this._actionHELO;
-        this.sendCommand("HELO "+this.options.name);
+    if(str.charAt(0) != "2") {
+        // If the server does not support STARTTLS, give up.
+        this._onError(new Error("Error initiating TLS - " + str), "SecurityError");
         return;
     }
     
@@ -1146,8 +1121,7 @@ function SmtpProber(credentials, connInfo) {
   this._conn = $simplesmtp(
     connInfo.port, connInfo.hostname,
     {
-      secureConnection: connInfo.crypto === true,
-      ignoreTLS: connInfo.crypto === false,
+      crypto: connInfo.crypto,
       auth: { user: credentials.username, pass: credentials.password },
       debug: exports.TEST_USE_DEBUG_MODE,
     });
@@ -1170,8 +1144,8 @@ SmtpProber.prototype = {
     if (!this.onresult)
       return;
     if (err && typeof(err) === 'object') {
-      // detect an nsISSLStatus instance by an unusual property.
-      if ('isNotValidAtThisTime' in err) {
+      // XXX just map all security errors as indicated by name
+      if (err.name && /^Security/.test(err.name)) {
         err = 'bad-security';
       }
       else {
@@ -1189,7 +1163,8 @@ SmtpProber.prototype = {
 
     this.error = err;
     if (err)
-      console.warn('PROBE:SMTP sad. error: |' + (err && err.message) + '|');
+      console.warn('PROBE:SMTP sad. error: | ' + (err && err.name || err) +
+                   ' | '  + (err && err.message || '') + ' |');
     else
       console.log('PROBE:SMTP happy');
 

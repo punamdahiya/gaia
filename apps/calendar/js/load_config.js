@@ -21,23 +21,6 @@ Calendar.LoadConfig = (function() {
     return str.replace(SLASH, '.');
   }
 
-  function loadStylesheet(source, cb) {
-    var el = document.createElement('link');
-    el.href = source;
-    el.rel = 'stylesheet';
-    el.type = 'text/css';
-
-    el.onerror = function stylesheetError(err) {
-      cb(new Error('could not load stylesheet "' + source + '"'));
-    };
-
-    el.onload = function stylesheetLoad() {
-      cb();
-    };
-
-    document.head.appendChild(el);
-  }
-
   var config = {
     jsRoot: '/js/',
     styleRoot: '/style/',
@@ -46,6 +29,19 @@ Calendar.LoadConfig = (function() {
     storeRoot: 'store/',
 
     plugins: {
+
+      dom: function(id, obs, cb) {
+        var node = document.getElementById(id);
+        if (!node) {
+          return cb();
+        }
+
+        LazyLoader.load([node], function nodeLoad() {
+          navigator.mozL10n.translate(node);
+          cb();
+        });
+      },
+
       js: function lc_importJS(file, obs, cb) {
         var name = camelize(file);
         var existsInPage = Calendar.ns(name, true);
@@ -57,13 +53,17 @@ Calendar.LoadConfig = (function() {
         }
 
         var file = this.config.jsRoot + file + '.js';
+        LazyLoader.load([file], cb);
+      },
 
-        Calendar.App.loadScript(file, cb);
+      shared: function lc_importShared(file, obs, cb) {
+        var file = this.config.sharedJsRoot + file + '.js';
+        LazyLoader.load([file], cb);
       },
 
       style: function lc_importStylesheet(file, obs, cb) {
         var file = this.config.styleRoot + file + '.css';
-        loadStylesheet(file, cb);
+        LazyLoader.load([file], cb);
       },
 
       storeLoad: function lc_loadStore(file, obs, cb) {
@@ -120,6 +120,8 @@ Calendar.LoadConfig = (function() {
       'Views.Settings': {
         group: ['Templates.Calendar'],
 
+        dom: ['settings'],
+
         js: [
           'view',
           'views/settings'
@@ -161,11 +163,15 @@ Calendar.LoadConfig = (function() {
       'Views.ModifyEvent': {
         group: ['Views.EventBase'],
 
+        dom: ['modify-event-view'],
+
         js: [
-          'utils/input_parser',
+          'querystring',
           'templates/alarm',
           'views/modify_event'
         ],
+
+        shared: ['input_parser'],
 
         style: ['modify_event_view']
       },
@@ -173,11 +179,14 @@ Calendar.LoadConfig = (function() {
       'Views.ViewEvent': {
         group: ['Views.EventBase'],
 
+        dom: ['event-view'],
+
         js: [
           'templates/alarm',
-          'utils/input_parser',
           'views/view_event'
         ],
+
+        shared: ['input_parser'],
 
         style: ['event_view']
       },
@@ -192,10 +201,14 @@ Calendar.LoadConfig = (function() {
 
       'Views.ModifyAccount': {
         group: ['Utils.AccountCreation'],
+
+        dom: ['modify-account-view'],
+
         js: [
           'view',
           'presets',
           'models/account',
+          'utils/uri',
           'views/modify_account'
         ],
 
@@ -203,6 +216,7 @@ Calendar.LoadConfig = (function() {
       },
 
       'Views.Errors': {
+        dom: ['lazy-styles', 'errors'],
         js: ['view', 'views/errors']
       },
 
@@ -230,6 +244,7 @@ Calendar.LoadConfig = (function() {
 
         js: [
           'calc',
+          'querystring',
           'utils/ordered_map',
           'utils/overlap',
           'view',
@@ -252,6 +267,8 @@ Calendar.LoadConfig = (function() {
           'Presets'
         ],
 
+        dom: ['create-account-view'],
+
         js: [
           'views/create_account'
         ]
@@ -268,9 +285,17 @@ Calendar.LoadConfig = (function() {
       'Views.AdvancedSettings': {
         group: ['Templates.Account'],
 
+        dom: ['advanced-settings-view'],
+
         js: [
           'templates/alarm',
           'views/advanced_settings'
+        ]
+      },
+
+      'Views.FirstTimeUse': {
+        js: [
+          'views/first_time_use'
         ]
       },
 
@@ -321,11 +346,20 @@ Calendar.LoadConfig = (function() {
       },
 
       'Provider.Local': {
-        group: ['Provider.Abstract'],
+        group: [
+          'Provider.Abstract',
+          'EventMutations'
+        ],
 
         js: [
           'ext/uuid',
-          'provider/local',
+          'provider/local'
+        ]
+      },
+
+      'EventMutations': {
+        js: [
+          'ext/uuid',
           'event_mutations'
         ]
       },
@@ -337,7 +371,10 @@ Calendar.LoadConfig = (function() {
       },
 
       'Provider.CaldavPullEvents': {
-        js: ['provider/caldav_pull_events']
+        js: [
+          'ext/uuid',
+          'provider/caldav_pull_events'
+        ]
       },
 
       'Provider.Caldav': {
@@ -393,6 +430,20 @@ Calendar.LoadConfig = (function() {
 
       'Presets': {
         js: ['presets']
+      },
+
+      'OAuthWindow': {
+
+        dom: ['oauth2'],
+
+        js: [
+          'querystring',
+          'oauth_window'
+        ]
+      },
+
+      'Notification': {
+        js: ['notification']
       }
     }
   };

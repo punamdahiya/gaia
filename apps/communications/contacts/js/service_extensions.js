@@ -11,11 +11,12 @@ if (typeof Contacts.extServices === 'undefined') {
     var oauthFrame = document.querySelector('#fb-oauth');
     oauthFrame.src = '/facebook/fb_oauth.html';
     var currentURI, access_token;
-    var canClose = true;
+    var canClose = true, canCloseLogout = true;
     var closeRequested = false;
 
     extServices.startLink = function(cid, linked) {
       canClose = true;
+      canCloseLogout = true;
       contactId = cid;
       if (!linked) {
         load('fb_link.html' + '?contactId=' + contactId, 'proposal',
@@ -37,9 +38,21 @@ if (typeof Contacts.extServices === 'undefined') {
       loadService('live');
     };
 
+    extServices.match = function(contactId) {
+      closeRequested = canClose = true;
+      extensionFrame.src = currentURI = 'matching_contacts.html?contactId=' +
+                                                                      contactId;
+    };
+
+    extServices.showDuplicateContacts = function() {
+      closeRequested = canClose = true;
+      extensionFrame.src = currentURI = 'matching_contacts.html';
+    };
+
     function loadService(serviceName) {
       closeRequested = false;
       canClose = false;
+      canCloseLogout = false;
       load('import.html?service=' + serviceName, 'friends', serviceName);
     }
 
@@ -61,14 +74,14 @@ if (typeof Contacts.extServices === 'undefined') {
     function close(message) {
       extensionFrame.addEventListener('transitionend', function tclose() {
         extensionFrame.removeEventListener('transitionend', tclose);
-        if (canClose === true) {
+        if (canClose === true && canCloseLogout === true) {
           unload();
         }
         else {
           closeRequested = true;
         }
 
-        if (message) {
+        if (message && message.trim().length > 0) {
           Contacts.showStatus(message);
         }
       // Otherwise we do nothing as the sync process will finish sooner or later
@@ -229,7 +242,7 @@ if (typeof Contacts.extServices === 'undefined') {
         }
       };
 
-      ConfirmDialog.show(null, msg, noObject, yesObject);
+      Contacts.confirmDialog(null, msg, noObject, yesObject);
     }
 
     function doUnlink(cid) {
@@ -304,23 +317,28 @@ if (typeof Contacts.extServices === 'undefined') {
         break;
 
         case 'import_updated':
-          Contacts.navigation.home(function fb_finished() {
-            extensionFrame.contentWindow.postMessage({
+          extensionFrame.contentWindow.postMessage({
               type: 'contacts_loaded',
               data: ''
             }, fb.CONTACTS_APP_ORIGIN);
-          });
         break;
 
         case 'sync_finished':
           // Sync finished thus the iframe can be safely "removed"
           canClose = true;
-          if (closeRequested) {
+          if (closeRequested && canCloseLogout) {
             unload();
           }
           // Check whether there has been changes or not
           if (data.data > 0) {
             notifySettings();
+          }
+        break;
+
+        case 'logout_finished':
+          canCloseLogout = true;
+          if (closeRequested && canClose) {
+            unload();
           }
         break;
 
@@ -337,6 +355,14 @@ if (typeof Contacts.extServices === 'undefined') {
             type: 'token',
             data: access_token
           }, fb.CONTACTS_APP_ORIGIN);
+
+        case 'show_duplicate_contacts':
+          extensionFrame.contentWindow.postMessage(data,
+                                                    fb.CONTACTS_APP_ORIGIN);
+
+        case 'duplicate_contacts_merged':
+          extensionFrame.contentWindow.postMessage(data,
+                                                    fb.CONTACTS_APP_ORIGIN);
         break;
       }
     }

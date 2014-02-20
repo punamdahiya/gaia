@@ -12,6 +12,18 @@
   background-color: rgba(0, 0, 0, 1);
 }
 
+@media not all and (-moz-physical-home-button) {
+  #screen:not(.software-button-disabled) #cards-view {
+    height: calc(100% - 5rem);
+    bottom: 5rem;
+  }
+}
+
+#screen.software-button-enabled #cards-view {
+  height: calc(100% - 5rem);
+  bottom: 5rem;
+}
+
 #cards-view.active {
   visibility: inherit;
   opacity: 1;
@@ -19,6 +31,27 @@
 
 #cards-view.no-transition {
   transition: none;
+}
+
+#cards-view .no-recent-apps {
+  display: none;
+  position: absolute;
+  top: calc(50% - 1rem);
+  left: 3rem;
+  width: calc(100% - 6rem);
+  height: 2rem;
+  text-align: center;
+  color: #52b6cc;
+  font-size: 2rem;
+  font-weight: 500;
+}
+
+#cards-view.empty .no-recent-apps {
+  display: block;
+}
+
+#cards-view.empty {
+  background-color: rgba(0, 0, 0, .8);
 }
 
 #cards-view ul {
@@ -32,18 +65,38 @@
 }
 
 #cards-view .card {
+  vertical-align: top;
   display: none;
   width: 100%;
   height: calc(100% - 2rem);
   margin: 0;
   margin-top: 2rem;
   position: absolute;
-  background-size: contain;
-  background-position: center center;
-  background-repeat: no-repeat;
   opacity: 0;
   pointer-events: none;
   transform: scale(0.8);
+}
+
+#cards-view .screenshotView {
+  background-size: cover;
+  background-position: left top;
+  background-repeat: no-repeat;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+#cards-view .screenshotView.rotate-90 {
+  transform: rotate(90deg);
+}
+
+#cards-view .screenshotView.rotate-270 {
+  transform: rotate(270deg);
+}
+
+#cards-view .screenshotView.rotate-180 {
+  transform: rotate(180deg);
+  transform-origin: 50% 50%;
 }
 
 #cards-view .card h1 {
@@ -66,13 +119,13 @@
 
 #cards-view .card > h1 {
   position: absolute;
-  top: -moz-calc(100% - 1.5rem);
+  top: calc(100% - 1.5rem);
   width: 100%;
 }
 
 #cards-view .card > p {
   position: absolute;
-  top: -moz-calc(100% + 1rem);
+  top: calc(100% + 1rem);
   width: 100%;
   font-size: 2rem;
 }
@@ -95,4 +148,17 @@
   width: 2.6rem;
   background: url(close.png) no-repeat center / 2.6rem;
   transform: scale(1.3);
+}
+
+#screen.task-manager #cards-view {
+  background: transparent;
+  margin-top: 5rem;
+}
+
+#screen.task-manager #cards-view li.card {
+  transform-origin: 50% 30%;
+}
+
+#screen.task-manager #cards-view .card > p {
+  display: none;
 }

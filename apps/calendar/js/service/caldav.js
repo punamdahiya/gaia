@@ -4,8 +4,11 @@ Calendar.ns('Service').Caldav = (function() {
 
   /* TODO: ugly hack to enable system XHR fix upstream in Caldav lib */
   var xhrOpts = {
+    /** system is required for cross domain XHR  */
     mozSystem: true,
+    /** mozAnon is required to avoid system level popups on 401 status */
     mozAnon: true,
+    /** enables use of mozilla only streaming api's when available */
     useMozChunkedText: true
   };
 
@@ -53,6 +56,38 @@ Calendar.ns('Service').Caldav = (function() {
 
     handleEvent: function(e) {
       this[e.type].apply(this, e.data);
+    },
+
+    /**
+     * Builds an Caldav connection from an account model object.
+     */
+    _createConnection: function(account) {
+      var params = Calendar.extend({}, account);
+      var preset = Calendar.Presets[account.preset];
+
+      if (
+          preset &&
+          preset.authenticationType &&
+          preset.apiCredentials
+      ) {
+        switch (preset.authenticationType) {
+          case 'oauth2':
+            params.httpHandler = 'oauth2';
+
+            // shallow copy the apiCredentials on the preset
+            params.apiCredentials =
+              Calendar.extend({}, preset.apiCredentials);
+
+            // the url in this case will always be tokenUrl
+            params.apiCredentials.url =
+              preset.apiCredentials.tokenUrl;
+
+            break;
+        }
+      }
+
+      var connection = new Caldav.Connection(params);
+      return connection;
     },
 
     _requestHome: function(connection, url) {
@@ -111,7 +146,7 @@ Calendar.ns('Service').Caldav = (function() {
 
     getAccount: function(account, callback) {
       var url = account.entrypoint;
-      var connection = new Caldav.Connection(account);
+      var connection = this._createConnection(account);
 
       var request = this._requestHome(connection, url);
       return request.send(function(err, data) {
@@ -120,9 +155,18 @@ Calendar.ns('Service').Caldav = (function() {
           return;
         }
 
-        callback(null, {
-          calendarHome: data.url
-        });
+        var result = {};
+
+        if (data.url)
+          result.calendarHome = data.url;
+
+        if (connection.oauth)
+          result.oauth = connection.oauth;
+
+        if (connection.user)
+          result.user = connection.user;
+
+        callback(null, result);
       });
     },
 
@@ -143,9 +187,7 @@ Calendar.ns('Service').Caldav = (function() {
     findCalendars: function(account, callback) {
       var self = this;
       var url = account.calendarHome;
-      var connection = new Caldav.Connection(
-        account
-      );
+      var connection = this._createConnection(account);
 
       var request = this._requestCalendars(
         connection,
@@ -715,9 +757,7 @@ Calendar.ns('Service').Caldav = (function() {
     streamEvents: function(account, calendar, options, stream, callback) {
       var self = this;
       var hasCompleted = false;
-      var connection = new Caldav.Connection(
-        account
-      );
+      var connection = this._createConnection(account);
 
       var cache = options.cached;
 
@@ -772,6 +812,11 @@ Calendar.ns('Service').Caldav = (function() {
           'DAV:/response', handleResponse
         );
 
+        if (err) {
+          callback(err);
+          return;
+        }
+
         if (!pending) {
           var missing = [];
 
@@ -783,7 +828,7 @@ Calendar.ns('Service').Caldav = (function() {
           stream.emit('missingEvents', missing);
 
           // notify the requester that we have completed.
-          callback(err);
+          callback();
         }
       });
     },
@@ -793,9 +838,7 @@ Calendar.ns('Service').Caldav = (function() {
     },
 
     deleteEvent: function(account, calendar, event, callback) {
-      var connection = new Caldav.Connection(
-        account
-      );
+      var connection = this._createConnection(account);
 
       var req = this._assetRequest(connection, event.url);
 
@@ -841,6 +884,29 @@ Calendar.ns('Service').Caldav = (function() {
     },
 
     /**
+     * Update absolute alarm times when the startDate changes.
+     *
+     * @param {ICAL.Time} originalDate of the event.
+     * @param {ICAL.Event} event to update.
+     */
+    adjustAbsoluteAlarms: function(originalDate, event) {
+      var newDate = event.startDate;
+      var alarms = event.component.getAllSubcomponents('valarm');
+
+      alarms.forEach(function(alarm) {
+        var trigger = alarm.getFirstProperty('trigger');
+        var value = trigger.getValues()[0].clone();
+
+        // absolute time
+        if (value instanceof ICAL.Time) {
+          // find absolute time difference
+          var diff = value.subtractDateTz(originalDate);
+          trigger.setValue(diff);
+        }
+      });
+    },
+
+    /**
      * Yahoo needs us to mirror all alarms as EMAIL alarms
      */
     mirrorAlarms: function(account) {
@@ -848,7 +914,7 @@ Calendar.ns('Service').Caldav = (function() {
     },
 
     createEvent: function(account, calendar, event, callback) {
-      var connection = new Caldav.Connection(account);
+      var connection = this._createConnection(account);
       var vcalendar = new ICAL.Component('vcalendar');
       var icalEvent = new ICAL.Event();
 
@@ -880,6 +946,11 @@ Calendar.ns('Service').Caldav = (function() {
       event.icalComponent = vcalendar.toString();
 
       req.put({}, event.icalComponent, function(err, data, xhr) {
+        if (err) {
+          callback(err);
+          return;
+        }
+
         var token = xhr.getResponseHeader('Etag');
         event.syncToken = token;
         // TODO: error handling
@@ -898,9 +969,7 @@ Calendar.ns('Service').Caldav = (function() {
      *  unmodified parsed ical component. (VCALENDAR).
      */
     updateEvent: function(account, calendar, eventDetails, callback) {
-      var connection = new Caldav.Connection(
-        account
-      );
+      var connection = this._createConnection(account);
 
       var icalComponent = eventDetails.icalComponent;
       var event = eventDetails.event;
@@ -918,6 +987,7 @@ Calendar.ns('Service').Caldav = (function() {
 
         var target = icalEvent;
         var vcalendar = icalEvent.component.parent;
+        var originalStartDate = target.startDate;
 
         // find correct event
         if (event.recurrenceId) {
@@ -951,7 +1021,10 @@ Calendar.ns('Service').Caldav = (function() {
           event.end
         );
 
-        // alarms
+        // adjust absolute alarm time ( we do this before adding/changing our
+        // new alarm times )
+        self.adjustAbsoluteAlarms(originalStartDate, target);
+
         // We generally want to remove all 'DISPLAY' alarms
         // UNLESS we are dealing with a YAHOO account
         // Then we overwrite all alarms
@@ -968,6 +1041,11 @@ Calendar.ns('Service').Caldav = (function() {
         event.icalComponent = vcal;
 
         req.put({}, vcal, function(err, data, xhr) {
+          if (err) {
+            callback(err);
+            return;
+          }
+
           var token = xhr.getResponseHeader('Etag');
           event.syncToken = token;
           // TODO: error handling

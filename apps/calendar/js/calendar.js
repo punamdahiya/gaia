@@ -1,11 +1,26 @@
 (function(window) {
 
   const NEXT_TICK = 'calendar-next-tick';
+  var NUMERIC = /^([0-9]+)$/;
   var nextTickStack = [];
+
+  var hasOwnProperty = Object.prototype.hasOwnProperty;
 
   window.Calendar = {
 
+    ERROR: 'error',
+    ACTIVE: 'active',
     DEBUG: false,
+
+    extend: function(target, input) {
+      for (var key in input) {
+        if (hasOwnProperty.call(input, key)) {
+          target[key] = input[key];
+        }
+      }
+
+      return target;
+    },
 
     /**
      * Very similar to node's nextTick.
@@ -81,6 +96,22 @@
       }
 
       return 0;
+    },
+
+    /**
+     * Ermahgerd!
+     *
+     * @param {number|string} id Some id.
+     */
+    probablyParseInt: function(id) {
+      // by an unfortunate decision we have both
+      // string ids and number ids.. based on the
+      // input we run parseInt
+      if (id.match && id.match(NUMERIC)) {
+        return parseInt(id, 10);
+      }
+
+      return id;
     },
 
     /**

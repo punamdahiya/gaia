@@ -103,52 +103,6 @@
   if (typeof exports === 'object')
     module.exports = factory();
   else if (typeof define === 'function' && define.amd)
-    define('activesync/codepages/ComposeMail',[], factory);
-  else
-    root.ASCPComposeMail = factory();
-}(this, function() {
-  'use strict';
-
-  return {
-    Tags: {
-      SendMail:        0x1505,
-      SmartForward:    0x1506,
-      SmartReply:      0x1507,
-      SaveInSentItems: 0x1508,
-      ReplaceMime:     0x1509,
-      /* Missing tag value 0x150A */
-      Source:          0x150B,
-      FolderId:        0x150C,
-      ItemId:          0x150D,
-      LongId:          0x150E,
-      InstanceId:      0x150F,
-      Mime:            0x1510,
-      ClientId:        0x1511,
-      Status:          0x1512,
-      AccountId:       0x1513,
-    }
-  };
-}));
-
-/* Copyright 2012 Mozilla Foundation
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-(function (root, factory) {
-  if (typeof exports === 'object')
-    module.exports = factory();
-  else if (typeof define === 'function' && define.amd)
     define('activesync/codepages/AirSync',[], factory);
   else
     root.ASCPAirSync = factory();
@@ -576,6 +530,7 @@ define('mailapi/activesync/folder',
     '../date',
     '../syncbase',
     '../util',
+    'mailapi/db/mail_rep',
     'activesync/codepages/AirSync',
     'activesync/codepages/AirSyncBase',
     'activesync/codepages/ItemEstimate',
@@ -590,6 +545,7 @@ define('mailapi/activesync/folder',
     $date,
     $sync,
     $util,
+    mailRep,
     $AirSync,
     $AirSyncBase,
     $ItemEstimate,
@@ -601,7 +557,11 @@ define('mailapi/activesync/folder',
   ) {
 'use strict';
 
-var DESIRED_SNIPPET_LENGTH = 100;
+/**
+ * The desired number of bytes to fetch when downloading bodies, but the body's
+ * size exceeds the maximum requested size.
+ */
+var DESIRED_TEXT_SNIPPET_BYTES = 512;
 
 /**
  * This is minimum number of messages we'd like to get for a folder for a given
@@ -647,7 +607,7 @@ function initFilterTypes() {
   };
 }
 
-var $wbxml, $mimelib, $quotechew, $htmlchew;
+var $wbxml, $mimelib, $mailchew;
 
 function lazyConnection(cbIndex, fn, failString) {
   return function lazyRun() {
@@ -655,13 +615,12 @@ function lazyConnection(cbIndex, fn, failString) {
         errback = args[cbIndex],
         self = this;
 
-    require(['wbxml', 'mimelib', '../quotechew', '../htmlchew'],
-    function (wbxml, mimelib, quotechew, htmlchew) {
+    require(['wbxml', 'mimelib', '../mailchew'],
+    function (wbxml, mimelib, mailchew) {
       if (!$wbxml) {
         $wbxml = wbxml;
         $mimelib = mimelib;
-        $quotechew = quotechew;
-        $htmlchew = htmlchew;
+        $mailchew = mailchew;
         initFilterTypes();
       }
 
@@ -754,6 +713,7 @@ ActiveSyncFolderConn.prototype = {
     account.conn.postCommand(w, function(aError, aResponse) {
       if (aError) {
         console.error(aError);
+        account._reportErrorIfNecessary(aError);
         callback('unknown');
         return;
       }
@@ -796,6 +756,8 @@ ActiveSyncFolderConn.prototype = {
     var ie = $ItemEstimate.Tags;
     var as = $AirSync.Tags;
 
+    var account = this._account;
+
     var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
     w.stag(ie.GetItemEstimate)
        .stag(ie.Collections)
@@ -815,8 +777,8 @@ ActiveSyncFolderConn.prototype = {
     }
     else {
           w.tag(ie.Class, 'Email')
-           .tag(ie.CollectionId, this.serverId)
            .tag(as.SyncKey, this.syncKey)
+           .tag(ie.CollectionId, this.serverId)
            .tag(as.FilterType, filterType);
     }
 
@@ -824,9 +786,10 @@ ActiveSyncFolderConn.prototype = {
        .etag(ie.Collections)
      .etag(ie.GetItemEstimate);
 
-    this._account.conn.postCommand(w, function(aError, aResponse) {
+    account.conn.postCommand(w, function(aError, aResponse) {
       if (aError) {
         console.error(aError);
+        account._reportErrorIfNecessary(aError);
         callback('unknown');
         return;
       }
@@ -883,7 +846,9 @@ ActiveSyncFolderConn.prototype = {
 
         folderConn._getItemEstimate(filterType, function(error, estimate) {
           if (error) {
-            callback('unknown');
+            // If we couldn't get an estimate, just tell the main callback that
+            // we want three days back.
+            callback(null, Type.ThreeDaysBack);
             return;
           }
 
@@ -1004,17 +969,14 @@ ActiveSyncFolderConn.prototype = {
              .stag(as.Options)
                .tag(as.FilterType, this.filterType)
 
-      // XXX: For some servers (e.g. Hotmail), we could be smart and get the
-      // native body type (plain text or HTML), but Gmail doesn't seem to let us
-      // do this. For now, let's keep it simple and always get HTML.
-      if (this._account.conn.currentVersion.gte('12.0'))
-              w.stag(asb.BodyPreference)
-                 .tag(asb.Type, asbEnum.Type.HTML)
-               .etag();
-
+      // Older versions of ActiveSync give us the body by default. Ensure they
+      // omit it.
+      if (this._account.conn.currentVersion.lte('12.0')) {
               w.tag(as.MIMESupport, asEnum.MIMESupport.Never)
-               .tag(as.MIMETruncation, asEnum.MIMETruncation.NoTruncate)
-             .etag()
+               .tag(as.Truncation, asEnum.MIMETruncation.TruncateAll);
+      }
+
+            w.etag()
            .etag()
          .etag()
        .etag();
@@ -1031,6 +993,7 @@ ActiveSyncFolderConn.prototype = {
 
       if (aError) {
         console.error('Error syncing folder:', aError);
+        folderConn._account._reportErrorIfNecessary(aError);
         callback('aborted');
         return;
       }
@@ -1073,7 +1036,8 @@ ActiveSyncFolderConn.prototype = {
             break;
           case as.ApplicationData:
             try {
-              msg = folderConn._parseMessage(child, node.tag === as.Add);
+              msg = folderConn._parseMessage(child, node.tag === as.Add,
+                                             storage);
             }
             catch (ex) {
               // If we get an error, just log it and skip this message.
@@ -1084,13 +1048,7 @@ ActiveSyncFolderConn.prototype = {
           }
         }
 
-        if (node.tag === as.Add) {
-          msg.header.id = id = storage._issueNewHeaderId();
-          msg.header.suid = folderConn._storage.folderId + '/' + id;
-          msg.header.guid = '';
-        }
         msg.header.srvid = guid;
-        // XXX need to get the message's message-id header value!
 
         var collection = node.tag === as.Add ? added : changed;
         collection.push(msg);
@@ -1159,7 +1117,7 @@ ActiveSyncFolderConn.prototype = {
    *   changed one
    * @return {object} An object containing the header and body for the message
    */
-  _parseMessage: function asfc__parseMessage(node, isAdded) {
+  _parseMessage: function asfc__parseMessage(node, isAdded, storage) {
     var em = $Email.Tags;
     var asb = $AirSyncBase.Tags;
     var asbEnum = $AirSyncBase.Enums;
@@ -1167,26 +1125,31 @@ ActiveSyncFolderConn.prototype = {
     var header, body, flagHeader;
 
     if (isAdded) {
+      var newId = storage._issueNewHeaderId();
+      // note: these will be passed through mailRep.make* later
       header = {
-        id: null,
+        id: newId,
+        // This will be fixed up afterwards for control flow paranoia.
         srvid: null,
-        suid: null,
-        guid: null,
+        suid: storage.folderId + '/' + newId,
+        // ActiveSync does not/cannot tell us the Message-ID header unless we
+        // fetch the entire MIME body
+        guid: '',
         author: null,
+        to: null,
+        cc: null,
+        bcc: null,
+        replyTo: null,
         date: null,
         flags: [],
         hasAttachments: false,
         subject: null,
-        snippet: null,
+        snippet: null
       };
 
       body = {
         date: null,
         size: 0,
-        to: null,
-        cc: null,
-        bcc: null,
-        replyTo: null,
         attachments: [],
         relatedParts: [],
         references: null,
@@ -1242,7 +1205,7 @@ ActiveSyncFolderConn.prototype = {
       }
     }
 
-    var bodyType, bodyText;
+    var bodyType, bodySize;
 
     for (var iter in Iterator(node.children)) {
       var child = iter[1];
@@ -1283,17 +1246,26 @@ ActiveSyncFolderConn.prototype = {
           var grandchild = iter2[1];
           switch (grandchild.tag) {
           case asb.Type:
-            bodyType = grandchild.children[0].textContent;
+            var type = grandchild.children[0].textContent;
+            if (type === asbEnum.Type.HTML)
+              bodyType = 'html';
+            else {
+              // I've seen a handful of extra-weird messages with body types
+              // that aren't plain or html. Let's assume they're plain, though.
+              if (type !== asbEnum.Type.PlainText)
+                console.warn('A message had a strange body type:', type)
+              bodyType = 'plain';
+            }
             break;
-          case asb.Data:
-            bodyText = grandchild.children[0].textContent;
+          case asb.EstimatedDataSize:
+            bodySize = grandchild.children[0].textContent;
             break;
           }
         }
         break;
-      case em.Body: // pre-ActiveSync 12.0
-        bodyType = asbEnum.Type.PlainText;
-        bodyText = childText;
+      case em.BodySize: // pre-ActiveSync 12.0
+        bodyType = 'plain';
+        bodySize = childText;
         break;
       case asb.Attachments: // ActiveSync 12.0+
       case em.Attachments:  // pre-ActiveSync 12.0
@@ -1328,7 +1300,8 @@ ActiveSyncFolderConn.prototype = {
               // Get the file's extension to look up a mimetype, but ignore it
               // if the filename is of the form '.bashrc'.
               dot = attachment.name.lastIndexOf('.');
-              ext = dot > 0 ? attachment.name.substring(dot + 1) : '';
+              ext = dot > 0 ? attachment.name.substring(dot + 1).toLowerCase() :
+                              '';
               attachment.type = $mimelib.contentTypes[ext] ||
                                 'application/octet-stream';
               break;
@@ -1354,72 +1327,294 @@ ActiveSyncFolderConn.prototype = {
           }
 
           if (isInline)
-            body.relatedParts.push(attachment);
+            body.relatedParts.push(mailRep.makeAttachmentPart(attachment));
           else
-            body.attachments.push(attachment);
+            body.attachments.push(mailRep.makeAttachmentPart(attachment));
         }
         header.hasAttachments = body.attachments.length > 0;
         break;
       }
     }
 
-    // Process the body as needed.
-    if (bodyType === asbEnum.Type.PlainText) {
-      try {
-        var bodyRep = $quotechew.quoteProcessTextBody(bodyText);
-      }
-      catch (ex) {
-        this._LOG.textChewError(ex);
-        // an empty content rep is better than nothing.
-        bodyRep = [];
-      }
-      try {
-        header.snippet = $quotechew.generateSnippet(bodyRep,
-                                                    DESIRED_SNIPPET_LENGTH);
-      }
-      catch (ex) {
-        this._LOG.textSnippetError(ex);
-        header.snippet = '';
-      }
+    body.bodyReps = [mailRep.makeBodyPart({
+      type: bodyType,
+      sizeEstimate: bodySize,
+      amountDownloaded: 0,
+      isDownloaded: false
+    })];
 
-      var content = bodyRep[1];
-      var len = content.length;
-
-      body.bodyReps = [{
-        type: 'plain',
-        content: bodyRep,
-        sizeEstimate: len,
-        amountDownloaded: len,
-        isDownloaded: true
-      }];
+    // If this is an add, then these are new structures so we need to normalize
+    // them.
+    if (isAdded) {
+      return {
+        header: mailRep.makeHeaderInfo(header),
+        body: mailRep.makeBodyInfo(body)
+      };
     }
-    else if (bodyType === asbEnum.Type.HTML) {
-      try {
-        var html = $htmlchew.sanitizeAndNormalizeHtml(bodyText);
-      }
-      catch (ex) {
-        this._LOG.htmlParseError(ex);
-        html = '';
-      }
-      try {
-        header.snippet = $htmlchew.generateSnippet(html);
-      }
-      catch (ex) {
-        this._LOG.htmlSnippetError(ex);
-        header.snippet = '';
-      }
-      var len = html.length;
+    // It's not an add, so this is a delta, and header/body have mergeInto
+    // methods and we should not attempt to normalize them.
+    else {
+      return { header: header, body: body };
+    }
+  },
 
-      body.bodyReps = [{
-        type: 'html',
-        content: html,
-        sizeEstimate: len,
-        amountDownloaded: len,
-        isDownloaded: true
-      }];
+  /**
+   * Download the bodies for a set of headers.
+   *
+   * XXX This method is a slightly modified version of
+   * ImapFolderConn._lazyDownloadBodies; we should attempt to remove the
+   * duplication.
+   */
+  downloadBodies: function(headers, options, callback) {
+    if (this._account.conn.currentVersion.lt('12.0'))
+      return this._syncBodies(headers, callback);
+
+    var anyErr,
+        pending = 1,
+        downloadsNeeded = 0,
+        folderConn = this;
+
+    function next(err) {
+      if (err && !anyErr)
+        anyErr = err;
+
+      if (!--pending) {
+        folderConn._storage.runAfterDeferredCalls(function() {
+          callback(anyErr, /* number downloaded */ downloadsNeeded - pending);
+        });
+      }
     }
 
-    return { header: header, body: body };
+    for (var i = 0; i < headers.length; i++) {
+      // We obviously can't do anything with null header references.
+      // To avoid redundant work, we also don't want to do any fetching if we
+      // already have a snippet.  This could happen because of the extreme
+      // potential for a caller to spam multiple requests at us before we
+      // service any of them.  (Callers should only have one or two outstanding
+      // jobs of this and do their own suppression tracking, but bugs happen.)
+      if (!headers[i] || headers[i].snippet !== null) {
+        continue;
+      }
+
+      pending++;
+      // This isn't absolutely guaranteed to be 100% correct, but is good enough
+      // for indicating to the caller that we did some work.
+      downloadsNeeded++;
+      this.downloadBodyReps(headers[i], options, next);
+    }
+
+    // by having one pending item always this handles the case of not having any
+    // snippets needing a download and also returning in the next tick of the
+    // event loop.
+    window.setZeroTimeout(next);
+  },
+
+  downloadBodyReps: lazyConnection(1, function(header, options, callback) {
+    var folderConn = this;
+    var account = this._account;
+
+    if (account.conn.currentVersion.lt('12.0'))
+      return this._syncBodies([header], callback);
+
+    if (typeof(options) === 'function') {
+      callback = options;
+      options = null;
+    }
+    options = options || {};
+
+    var io = $ItemOperations.Tags;
+    var ioEnum = $ItemOperations.Enums;
+    var as = $AirSync.Tags;
+    var asEnum = $AirSync.Enums;
+    var asb = $AirSyncBase.Tags;
+    var Type = $AirSyncBase.Enums.Type;
+
+    var gotBody = function gotBody(bodyInfo) {
+      // ActiveSync only stores one body rep, no matter how many body parts the
+      // MIME message actually has.
+      var bodyRep = bodyInfo.bodyReps[0];
+      var bodyType = bodyRep.type === 'html' ? Type.HTML : Type.PlainText;
+      var truncationSize;
+
+      // If the body is bigger than the max size, grab a small bit of plain text
+      // to show as the snippet.
+      if (options.maximumBytesToFetch < bodyRep.sizeEstimate) {
+        bodyType = Type.PlainText;
+        truncationSize = DESIRED_TEXT_SNIPPET_BYTES;
+      }
+
+      var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
+      w.stag(io.ItemOperations)
+         .stag(io.Fetch)
+           .tag(io.Store, 'Mailbox')
+           .tag(as.CollectionId, folderConn.serverId)
+           .tag(as.ServerId, header.srvid)
+           .stag(io.Options)
+             // Only get the AirSyncBase:Body element to minimize bandwidth.
+             .stag(io.Schema)
+               .tag(asb.Body)
+             .etag()
+             .stag(asb.BodyPreference)
+               .tag(asb.Type, bodyType);
+
+      if (truncationSize)
+              w.tag(asb.TruncationSize, truncationSize);
+
+            w.etag()
+           .etag()
+         .etag()
+       .etag();
+
+      account.conn.postCommand(w, function(aError, aResponse) {
+        if (aError) {
+          console.error(aError);
+          account._reportErrorIfNecessary(aError);
+          callback('unknown');
+          return;
+        }
+
+        var status, bodyContent,
+            e = new $wbxml.EventParser();
+        e.addEventListener([io.ItemOperations, io.Status], function(node) {
+          status = node.children[0].textContent;
+        });
+        e.addEventListener([io.ItemOperations, io.Response, io.Fetch,
+                            io.Properties, asb.Body, asb.Data], function(node) {
+          bodyContent = node.children[0].textContent;
+        });
+        e.run(aResponse);
+
+        if (status !== ioEnum.Status.Success)
+          return callback('unknown');
+
+        folderConn._updateBody(header, bodyInfo, bodyContent, !!truncationSize,
+                               callback);
+      });
+    };
+
+    this._storage.getMessageBody(header.suid, header.date, gotBody);
+  }),
+
+  /**
+   * Sync message bodies. This function should only be used against ActiveSync
+   * 2.5! XXX: This *always* downloads the bodies for all the messages, even if
+   * it exceeds the maximum requested size.
+   */
+  _syncBodies: function(headers, callback) {
+    var as = $AirSync.Tags;
+    var asEnum = $AirSync.Enums;
+    var em = $Email.Tags;
+
+    var folderConn = this;
+    var account = this._account;
+
+    var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
+    w.stag(as.Sync)
+       .stag(as.Collections)
+         .stag(as.Collection)
+           .tag(as.Class, 'Email')
+           .tag(as.SyncKey, this.syncKey)
+           .tag(as.CollectionId, this.serverId)
+           .stag(as.Options)
+             .tag(as.MIMESupport, asEnum.MIMESupport.Never)
+           .etag()
+           .stag(as.Commands);
+
+    for (var i = 0; i < headers.length; i++) {
+            w.stag(as.Fetch)
+               .tag(as.ServerId, headers[i].srvid)
+             .etag();
+    }
+
+          w.etag()
+         .etag()
+       .etag()
+     .etag();
+
+    account.conn.postCommand(w, function(aError, aResponse) {
+      if (aError) {
+        console.error(aError);
+        account._reportErrorIfNecessary(aError);
+        callback('unknown');
+        return;
+      }
+
+      var status, anyErr,
+          i = 0,
+          pending = 1;
+
+      function next(err) {
+        if (err && !anyErr)
+          anyErr = err;
+
+        if (!--pending) {
+          folderConn._storage.runAfterDeferredCalls(function() {
+            callback(anyErr);
+          });
+        }
+      }
+
+      var e = new $wbxml.EventParser();
+      var base = [as.Sync, as.Collections, as.Collection];
+      e.addEventListener(base.concat(as.SyncKey), function(node) {
+        folderConn.syncKey = node.children[0].textContent;
+      });
+      e.addEventListener(base.concat(as.Status), function(node) {
+        status = node.children[0].textContent;
+      });
+      e.addEventListener(base.concat(as.Responses, as.Fetch,
+                                     as.ApplicationData, em.Body),
+                         function(node) {
+        // We assume the response is in the same order as the request!
+        var header = headers[i++];
+        var bodyContent = node.children[0].textContent;
+
+        pending++;
+        folderConn._storage.getMessageBody(header.suid, header.date,
+                                           function(body) {
+          folderConn._updateBody(header, body, bodyContent, false, next);
+        });
+      });
+      e.run(aResponse);
+
+      if (status !== asEnum.Status.Success)
+        return next('unknown');
+
+      next(null);
+    });
+  },
+
+  _updateBody: function(header, bodyInfo, bodyContent, snippetOnly, callback) {
+    var bodyRep = bodyInfo.bodyReps[0];
+
+    // XXX We don't want a trailing newline, primarily for unit test reasons
+    // right now... This might be a problem on our compose-side for activesync.
+    if (bodyContent.length && bodyContent[bodyContent.length - 1] === '\n')
+      bodyContent = bodyContent.slice(0, -1);
+
+    // We neither need to store or want to deal with \r in the processing of
+    // the body.
+    bodyContent = bodyContent.replace(/\r/g, '');
+
+    var type = snippetOnly ? 'plain' : bodyRep.type;
+    var data = $mailchew.processMessageContent(bodyContent, type, !snippetOnly,
+                                               true, this._LOG);
+
+    header.snippet = data.snippet;
+    bodyRep.isDownloaded = !snippetOnly;
+    bodyRep.amountDownloaded = bodyContent.length;
+    if (!snippetOnly)
+      bodyRep.content = data.content;
+
+    var event = {
+      changeDetails: {
+        bodyReps: [0]
+      }
+    };
+
+    this._storage.updateMessageHeader(header.date, header.id, false, header);
+    this._storage.updateMessageBody(header, bodyInfo, {}, event);
+    this._storage.runAfterDeferredCalls(callback.bind(null, null, bodyInfo));
   },
 
   sync: lazyConnection(1, function asfc_sync(accuracyStamp, doneCallback,
@@ -1444,6 +1639,8 @@ ActiveSyncFolderConn.prototype = {
         return;
       }
       else if (error) {
+        // Sync is over!
+        folderConn._LOG.sync_end(null, null, null);
         doneCallback(error);
         return;
       }
@@ -1490,14 +1687,19 @@ ActiveSyncFolderConn.prototype = {
       if (!moreAvailable) {
         var messagesSeen = addedMessages + changedMessages + deletedMessages;
 
-        // Note: For the second argument here, we report the number of messages
-        // we saw that *changed*. This differs from IMAP, which reports the
-        // number of messages it *saw*.
-        folderConn._LOG.sync_end(addedMessages, changedMessages,
-                                 deletedMessages);
-        storage.markSyncRange($sync.OLDEST_SYNC_DATE, accuracyStamp, 'XXX',
-                              accuracyStamp);
-        doneCallback(null, null, messagesSeen);
+        // Do not report completion of sync until all of our operations have
+        // been persisted to our in-memory database.  (We do not wait for
+        // things to hit the disk.)
+        storage.runAfterDeferredCalls(function() {
+          // Note: For the second argument here, we report the number of
+          // messages we saw that *changed*. This differs from IMAP, which
+          // reports the number of messages it *saw*.
+          folderConn._LOG.sync_end(addedMessages, changedMessages,
+                                   deletedMessages);
+          storage.markSyncRange($sync.OLDEST_SYNC_DATE, accuracyStamp, 'XXX',
+                                accuracyStamp);
+          doneCallback(null, null, messagesSeen);
+        });
       }
     },
     progressCallback);
@@ -1507,13 +1709,14 @@ ActiveSyncFolderConn.prototype = {
     var folderConn = this;
 
     var as = $AirSync.Tags;
+    var account = this._account;
 
     var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
     w.stag(as.Sync)
        .stag(as.Collections)
          .stag(as.Collection);
 
-    if (this._account.conn.currentVersion.lt('12.1'))
+    if (account.conn.currentVersion.lt('12.1'))
           w.tag(as.Class, 'Email');
 
           w.tag(as.SyncKey, this.syncKey)
@@ -1541,9 +1744,10 @@ ActiveSyncFolderConn.prototype = {
        .etag(as.Collections)
      .etag(as.Sync);
 
-    this._account.conn.postCommand(w, function(aError, aResponse) {
+    account.conn.postCommand(w, function(aError, aResponse) {
       if (aError) {
         console.error('postCommand error:', aError);
+        account._reportErrorIfNecessary(aError);
         callWhenDone('unknown');
         return;
       }
@@ -1607,6 +1811,7 @@ ActiveSyncFolderConn.prototype = {
     this._account.conn.postCommand(w, function(aError, aResult) {
       if (aError) {
         console.error('postCommand error:', aError);
+        folderConn._account._reportErrorIfNecessary(aError);
         callback('unknown');
         return;
       }
@@ -1705,7 +1910,7 @@ ActiveSyncFolderSyncer.prototype = {
 
   initialSync: function(slice, initialDays, syncCallback,
                         doneCallback, progressCallback) {
-    syncCallback('sync', false, true);
+    syncCallback('sync', true /* Ignore Headers */);
     this.folderConn.sync(
       $date.NOW(),
       this.onSyncCompleted.bind(this, doneCallback, true),
@@ -1858,7 +2063,9 @@ var LOGFAB = exports.LOGFAB = $log.register($module, {
 define('mailapi/activesync/jobs',
   [
     'rdcommon/log',
+    'mix',
     '../jobmixins',
+    'mailapi/drafts/jobs',
     'activesync/codepages/AirSync',
     'activesync/codepages/Email',
     'activesync/codepages/Move',
@@ -1868,7 +2075,9 @@ define('mailapi/activesync/jobs',
   ],
   function(
     $log,
+    mix,
     $jobmixins,
+    draftsJobs,
     $AirSync,
     $Email,
     $Move,
@@ -2137,6 +2346,7 @@ ActiveSyncJobDriver.prototype = {
   undo_move: function(op, jobDoneCallback) {
   },
 
+
   //////////////////////////////////////////////////////////////////////////////
   // delete
 
@@ -2216,7 +2426,6 @@ ActiveSyncJobDriver.prototype = {
         inboxStorage;
     if (inboxFolder && inboxFolder.serverId === null)
       inboxStorage = account.getFolderStorageForFolderId(inboxFolder.id);
-
     account.syncFolderList(function(err) {
       if (!err)
         account.meta.lastFolderSyncAt = Date.now();
@@ -2250,7 +2459,25 @@ ActiveSyncJobDriver.prototype = {
   },
 
   //////////////////////////////////////////////////////////////////////////////
-  // download
+  // downloadBodies: Download the bodies from a list of messages
+
+  local_do_downloadBodies: $jobmixins.local_do_downloadBodies,
+
+  do_downloadBodies: $jobmixins.do_downloadBodies,
+
+  check_downloadBodies: $jobmixins.check_downloadBodies,
+
+  //////////////////////////////////////////////////////////////////////////////
+  // downloadBodyReps: Download the bodies from a single message
+
+  local_do_downloadBodyReps: $jobmixins.local_do_downloadBodyReps,
+
+  do_downloadBodyReps: $jobmixins.do_downloadBodyReps,
+
+  check_downloadBodyReps: $jobmixins.check_downloadBodyReps,
+
+  //////////////////////////////////////////////////////////////////////////////
+  // download: Download one or more attachments from a single message
 
   local_do_download: $jobmixins.local_do_download,
 
@@ -2261,32 +2488,6 @@ ActiveSyncJobDriver.prototype = {
   local_undo_download: $jobmixins.local_undo_download,
 
   undo_download: $jobmixins.undo_download,
-
-  //////////////////////////////////////////////////////////////////////////////
-  // saveDraft
-
-  local_do_saveDraft: $jobmixins.local_do_saveDraft,
-
-  do_saveDraft: $jobmixins.do_saveDraft,
-
-  check_saveDraft: $jobmixins.check_saveDraft,
-
-  local_undo_saveDraft: $jobmixins.local_undo_saveDraft,
-
-  undo_saveDraft: $jobmixins.undo_saveDraft,
-
-  //////////////////////////////////////////////////////////////////////////////
-  // deleteDraft
-
-  local_do_deleteDraft: $jobmixins.local_do_deleteDraft,
-
-  do_deleteDraft: $jobmixins.do_deleteDraft,
-
-  check_deleteDraft: $jobmixins.check_deleteDraft,
-
-  local_undo_deleteDraft: $jobmixins.local_undo_deleteDraft,
-
-  undo_deleteDraft: $jobmixins.undo_deleteDraft,
 
   //////////////////////////////////////////////////////////////////////////////
   // purgeExcessMessages is a NOP for activesync
@@ -2313,6 +2514,8 @@ ActiveSyncJobDriver.prototype = {
 
   //////////////////////////////////////////////////////////////////////////////
 };
+
+mix(ActiveSyncJobDriver.prototype, draftsJobs.draftsMixins);
 
 var LOGFAB = exports.LOGFAB = $log.register($module, {
   ActiveSyncJobDriver: {
@@ -2344,8 +2547,9 @@ define('mailapi/activesync/account',
     '../accountmixins',
     '../mailslice',
     '../searchfilter',
+    // We potentially create the synthetic inbox while offline, so this can't be
+    // lazy-loaded.
     'activesync/codepages/FolderHierarchy',
-    'activesync/codepages/ComposeMail',
     './folder',
     './jobs',
     '../util',
@@ -2360,7 +2564,6 @@ define('mailapi/activesync/account',
     $mailslice,
     $searchfilter,
     $FolderHierarchy,
-    $ComposeMail,
     $asfolder,
     $asjobs,
     $util,
@@ -2371,27 +2574,26 @@ define('mailapi/activesync/account',
 'use strict';
 
 // Lazy loaded vars.
-var $wbxml;
+var $wbxml, $asproto, ASCP;
 
 var bsearchForInsert = $util.bsearchForInsert;
 
 var DEFAULT_TIMEOUT_MS = exports.DEFAULT_TIMEOUT_MS = 30 * 1000;
 
+/**
+ * Prototype-helper to wrap a method in a call to withConnection.  This exists
+ * largely for historical reasons.  All actual lazy-loading happens within
+ * withConnection.
+ */
 function lazyConnection(cbIndex, fn, failString) {
   return function lazyRun() {
     var args = Array.slice(arguments),
         errback = args[cbIndex],
         self = this;
 
-    require(['wbxml'], function (wbxml) {
-      if (!$wbxml) {
-        $wbxml = wbxml;
-      }
-
-      self.withConnection(errback, function () {
-        fn.apply(self, args);
-      }, failString);
-    });
+    this.withConnection(errback, function () {
+      fn.apply(self, args);
+    }, failString);
   };
 }
 
@@ -2401,14 +2603,17 @@ function ActiveSyncAccount(universe, accountDef, folderInfos, dbConn,
   this.id = accountDef.id;
   this.accountDef = accountDef;
 
-  if (receiveProtoConn)
-    this.conn = receiveProtoConn;
-  else
-    this.conn = null;
-
   this._db = dbConn;
 
   this._LOG = LOGFAB.ActiveSyncAccount(this, _parentLog, this.id);
+
+  if (receiveProtoConn) {
+    this.conn = receiveProtoConn;
+    this._attachLoggerToConnection(this.conn);
+  }
+  else {
+    this.conn = null;
+  }
 
   this.enabled = true;
   this.problems = [];
@@ -2465,6 +2670,7 @@ function ActiveSyncAccount(universe, accountDef, folderInfos, dbConn,
 exports.Account = exports.ActiveSyncAccount = ActiveSyncAccount;
 ActiveSyncAccount.prototype = {
   type: 'activesync',
+  supportsServerFolders: true,
   toString: function asa_toString() {
     return '[ActiveSyncAccount: ' + this.id + ']';
   },
@@ -2474,30 +2680,120 @@ ActiveSyncAccount.prototype = {
    * initialized yet.
    */
   withConnection: function (errback, callback, failString) {
-    if (!this.conn) {
-      require(['activesync/protocol'], function (activesync) {
-        var accountDef = this.accountDef;
-        this.conn = new activesync.Connection();
-        this.conn.open(accountDef.connInfo.server,
-                       accountDef.credentials.username,
-                       accountDef.credentials.password);
-        this.conn.timeout = DEFAULT_TIMEOUT_MS;
+    // lazy load our dependencies if they haven't already been fetched.  This
+    // occurs regardless of whether we have a connection already or not.  We
+    // do this because the connection may have been passed-in to us as a
+    // leftover of the account creation process.
+    if (!$wbxml) {
+      require(['wbxml', 'activesync/protocol', 'activesync/codepages'],
+              function (_wbxml, _asproto, _ASCP) {
+        $wbxml = _wbxml;
+        $asproto = _asproto;
+        ASCP = _ASCP;
 
         this.withConnection(errback, callback, failString);
       }.bind(this));
       return;
     }
 
+    if (!this.conn) {
+      var accountDef = this.accountDef;
+      this.conn = new $asproto.Connection();
+      this._attachLoggerToConnection(this.conn);
+      this.conn.open(accountDef.connInfo.server,
+                     accountDef.credentials.username,
+                     accountDef.credentials.password);
+      this.conn.timeout = DEFAULT_TIMEOUT_MS;
+    }
+
     if (!this.conn.connected) {
       this.conn.connect(function(error) {
         if (error) {
+          this._reportErrorIfNecessary(error);
           errback(failString || 'unknown');
           return;
         }
         callback();
-      });
+      }.bind(this));
     } else {
       callback();
+    }
+  },
+
+  /**
+   * Reports the error to the user if necessary.
+   */
+  _reportErrorIfNecessary: function(error) {
+    if (!error) {
+      return;
+    }
+
+    if (error instanceof $asproto.HttpError && error.status === 401) {
+      // prompt the user to try a different password
+      this.universe.__reportAccountProblem(this, 'bad-user-or-pass');
+    }
+  },
+
+
+  _attachLoggerToConnection: function(conn) {
+    // Use a somewhat unique-ish value for the id so that if we re-create the
+    // connection it's obvious it's different from the previous connection.
+    var logger = LOGFAB.ActiveSyncConnection(conn, this._LOG,
+                                             Date.now() % 1000);
+    if (logger.logLevel === 'safe') {
+      conn.onmessage = this._onmessage_safe.bind(this, logger);
+    }
+    else if (logger.logLevel === 'dangerous') {
+      conn.onmessage = this._onmessage_dangerous.bind(this, logger);
+    }
+  },
+
+  /**
+   * Basic onmessage ActiveSync protocol logging function.  This does not
+   * include user data and is intended for safe circular logging purposes.
+   */
+  _onmessage_safe: function onmessage(logger,
+      type, special, xhr, params, extraHeaders, sentData, response) {
+    if (type === 'options') {
+      logger.options(special, xhr.status, response);
+    }
+    else {
+      logger.command(type, special, xhr.status);
+    }
+  },
+
+  /**
+   * Dangerous onmessage ActiveSync protocol logging function.  This is
+   * intended to log user data for unit testing purposes or very specialized
+   * debugging only.
+   */
+  _onmessage_dangerous: function onmessage(logger,
+      type, special, xhr, params, extraHeaders, sentData, response) {
+    if (type === 'options') {
+      logger.options(special, xhr.status, response);
+    }
+    else {
+      var sentXML, receivedXML;
+      if (sentData) {
+        try {
+          var sentReader = new $wbxml.Reader(new Uint8Array(sentData), ASCP);
+          sentXML = sentReader.dump();
+        }
+        catch (ex) {
+          sentXML = 'parse problem';
+        }
+      }
+      if (response) {
+        try {
+          receivedXML = response.dump();
+          response.rewind();
+        }
+        catch (ex) {
+          receivedXML = 'parse problem';
+        }
+      }
+      logger.command(type, special, xhr.status, params, extraHeaders, sentXML,
+                     receivedXML);
     }
   },
 
@@ -2508,10 +2804,14 @@ ActiveSyncAccount.prototype = {
       path: this.accountDef.name,
       type: this.accountDef.type,
 
+      defaultPriority: this.accountDef.defaultPriority,
+
       enabled: this.enabled,
       problems: this.problems,
 
       syncRange: this.accountDef.syncRange,
+      syncInterval: this.accountDef.syncInterval,
+      notifyOnNew: this.accountDef.notifyOnNew,
 
       identities: this.identities,
 
@@ -2541,32 +2841,22 @@ ActiveSyncAccount.prototype = {
     return 0;
   },
 
-  saveAccountState: function asa_saveAccountState(reuseTrans, callback,
-                                                  reason) {
-    if (!this._alive) {
-      this._LOG.accountDeleted('saveAccountState');
-      return;
+  /**
+   * Check that the account is healthy in that we can login at all.
+   */
+  checkAccount: function(callback) {
+    // disconnect first so as to properly check credentials
+    if (this.conn != null) {
+      if (this.conn.connected) {
+        this.conn.disconnect();
+      }
+      this.conn = null;
     }
-
-    var account = this;
-    var perFolderStuff = [];
-    for (var iter in Iterator(this.folders)) {
-      var folder = iter[1];
-      var folderStuff = this._folderStorages[folder.id]
-                           .generatePersistenceInfo();
-      if (folderStuff)
-        perFolderStuff.push(folderStuff);
-    }
-
-    this._LOG.saveAccountState(reason);
-    var trans = this._db.saveAccountFolderStates(
-      this.id, this._folderInfos, perFolderStuff, this._deadFolderIds,
-      function stateSaved() {
-        if (callback)
-         callback();
-      }, reuseTrans);
-    this._deadFolderIds = null;
-    return trans;
+    this.withConnection(function(err) {
+      callback(err);
+    }, function() {
+      callback();
+    });
   },
 
   /**
@@ -2606,7 +2896,7 @@ ActiveSyncAccount.prototype = {
   syncFolderList: lazyConnection(0, function asa_syncFolderList(callback) {
     var account = this;
 
-    var fh = $FolderHierarchy.Tags;
+    var fh = ASCP.FolderHierarchy.Tags;
     var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
     w.stag(fh.FolderSync)
        .tag(fh.SyncKey, this.meta.syncKey)
@@ -2614,6 +2904,7 @@ ActiveSyncAccount.prototype = {
 
     this.conn.postCommand(w, function(aError, aResponse) {
       if (aError) {
+        account._reportErrorIfNecessary(aError);
         callback(aError);
         return;
       }
@@ -2846,7 +3137,10 @@ ActiveSyncAccount.prototype = {
 
   /**
    * Recreate the folder storage for a particular folder; useful when we end up
-   * desyncing with the server and need to start fresh.
+   * desyncing with the server and need to start fresh.  No notification is
+   * generated, although slices are repopulated.
+   *
+   * FYI: There is a nearly identical method in IMAP's account implementation.
    *
    * @param {string} folderId the local ID of the folder
    * @param {function} callback a function to be called when the operation is
@@ -2933,9 +3227,9 @@ ActiveSyncAccount.prototype = {
     var parentFolderServerId = parentFolderId ?
       this._folderInfos[parentFolderId] : '0';
 
-    var fh = $FolderHierarchy.Tags;
-    var fhStatus = $FolderHierarchy.Enums.Status;
-    var folderType = $FolderHierarchy.Enums.Type.Mail;
+    var fh = ASCP.FolderHierarchy.Tags;
+    var fhStatus = ASCP.FolderHierarchy.Enums.Status;
+    var folderType = ASCP.FolderHierarchy.Enums.Type.Mail;
 
     var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
     w.stag(fh.FolderCreate)
@@ -2946,6 +3240,8 @@ ActiveSyncAccount.prototype = {
      .etag();
 
     this.conn.postCommand(w, function(aError, aResponse) {
+      account._reportErrorIfNecessary(aError);
+
       var e = new $wbxml.EventParser();
       var status, serverId;
 
@@ -2995,9 +3291,9 @@ ActiveSyncAccount.prototype = {
 
     var folderMeta = this._folderInfos[folderId].$meta;
 
-    var fh = $FolderHierarchy.Tags;
-    var fhStatus = $FolderHierarchy.Enums.Status;
-    var folderType = $FolderHierarchy.Enums.Type.Mail;
+    var fh = ASCP.FolderHierarchy.Tags;
+    var fhStatus = ASCP.FolderHierarchy.Enums.Status;
+    var folderType = ASCP.FolderHierarchy.Enums.Type.Mail;
 
     var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
     w.stag(fh.FolderDelete)
@@ -3006,6 +3302,8 @@ ActiveSyncAccount.prototype = {
      .etag();
 
     this.conn.postCommand(w, function(aError, aResponse) {
+      account._reportErrorIfNecessary(aError);
+
       var e = new $wbxml.EventParser();
       var status;
 
@@ -3042,22 +3340,26 @@ ActiveSyncAccount.prototype = {
 
     // we want the bcc included because that's how we tell the server the bcc
     // results.
-    composer.withMessageBuffer({ includeBcc: true }, function(mimeBuffer) {
+    composer.withMessageBlob({ includeBcc: true }, function(mimeBlob) {
       // ActiveSync 14.0 has a completely different API for sending email. Make
       // sure we format things the right way.
       if (this.conn.currentVersion.gte('14.0')) {
-        var cm = $ComposeMail.Tags;
-        var w = new $wbxml.Writer('1.3', 1, 'UTF-8');
+        var cm = ASCP.ComposeMail.Tags;
+        var w = new $wbxml.Writer('1.3', 1, 'UTF-8', null, 'blob');
         w.stag(cm.SendMail)
+           // The ClientId is defined to be for duplicate messages suppression
+           // and does not need to have any uniqueness constraints apart from
+           // not being similar to (recently sent) messages by this client.
            .tag(cm.ClientId, Date.now().toString()+'@mozgaia')
            .tag(cm.SaveInSentItems)
            .stag(cm.Mime)
-             .opaque(mimeBuffer)
+             .opaque(mimeBlob)
            .etag()
          .etag();
 
         this.conn.postCommand(w, function(aError, aResponse) {
           if (aError) {
+            account._reportErrorIfNecessary(aError);
             console.error(aError);
             callback('unknown');
             return;
@@ -3075,14 +3377,10 @@ ActiveSyncAccount.prototype = {
         });
       }
       else { // ActiveSync 12.x and lower
-        var encoder = new TextEncoder('UTF-8');
-
-        // On B2G 18, XHRs expect ArrayBuffers and will barf on Uint8Arrays. In
-        // the future, we can remove the last |.buffer| bit below.
-        this.conn.postData('SendMail', 'message/rfc822',
-                           encoder.encode(mimeBuffer).buffer,
+        this.conn.postData('SendMail', 'message/rfc822', mimeBlob,
                            function(aError, aResponse) {
           if (aError) {
+            account._reportErrorIfNecessary(aError);
             console.error(aError);
             callback('unknown');
             return;
@@ -3128,6 +3426,9 @@ ActiveSyncAccount.prototype = {
 
   runOp: $acctmixins.runOp,
   getFirstFolderWithType: $acctmixins.getFirstFolderWithType,
+  getFolderByPath: $acctmixins.getFolderByPath,
+  saveAccountState: $acctmixins.saveAccountState,
+  runAfterSaves: $acctmixins.runAfterSaves
 };
 
 var LOGFAB = exports.LOGFAB = $log.register($module, {
@@ -3151,6 +3452,19 @@ var LOGFAB = exports.LOGFAB = $log.register($module, {
       opError: { mode: false, type: false, ex: $log.EXCEPTION },
     }
   },
+
+  ActiveSyncConnection: {
+    type: $log.CONNECTION,
+    events: {
+      options: { special: false, status: false, result: false },
+      command: { name: false, special: false, status: false },
+    },
+    TEST_ONLY_events: {
+      options: {},
+      command: { params: false, extraHeaders: false, sent: false,
+                 response: false },
+    },
+  },
 });
 
 }); // end define
@@ -3165,6 +3479,8 @@ define('mailapi/activesync/configurator',
     '../accountcommon',
     '../a64',
     './account',
+    '../date',
+    'require',
     'exports'
   ],
   function(
@@ -3172,8 +3488,57 @@ define('mailapi/activesync/configurator',
     $accountcommon,
     $a64,
     $asacct,
+    $date,
+    require,
     exports
   ) {
+
+function checkServerCertificate(url, callback) {
+  var match = /^https:\/\/([^:/]+)(?::(\d+))?/.exec(url);
+  // probably unit test http case?
+  if (!match) {
+    callback(null);
+    return;
+  }
+  var port = match[2] ? parseInt(match[2], 10) : 443,
+      host = match[1];
+
+  console.log('checking', host, port, 'for security problem');
+
+  require(['tls'], function($tls) {
+    var sock = $tls.connect(port, host);
+    function reportAndClose(err) {
+      if (sock) {
+        var wasSock = sock;
+        sock = null;
+        try {
+          wasSock.end();
+        }
+        catch (ex) {
+        }
+        callback(err);
+      }
+    }
+    // this is a little dumb, but since we don't actually get an event right now
+    // that tells us when our secure connection is established, and connect always
+    // happens, we write data when we connect to help trigger an error or have us
+    // receive data to indicate we successfully connected.
+    // so, the deal is that connect is going to happen.
+    sock.on('connect', function() {
+      sock.write(new Buffer('GET /images/logo.png HTTP/1.1\n\n'));
+    });
+    sock.on('error', function(err) {
+      var reportErr = null;
+      if (err && typeof(err) === 'object' &&
+          /^Security/.test(err.name))
+        reportErr = 'bad-security';
+      reportAndClose(reportErr);
+    });
+    sock.on('data', function(data) {
+      reportAndClose(null);
+    });
+  });
+}
 
 exports.account = $asacct;
 exports.configurator = {
@@ -3215,9 +3580,20 @@ exports.configurator = {
             }
           }
           else {
-            // We didn't talk to the server, so let's call it an unresponsive
-            // server.
-            failureType = 'unresponsive-server';
+            // We didn't talk to the server, so it's either an unresponsive
+            // server or a server with a bad certificate.  (We require https
+            // outside of unit tests so there's no need to branch here.)
+            checkServerCertificate(
+              domainInfo.incoming.server,
+              function(securityError) {
+                var failureType;
+                if (securityError)
+                  failureType = 'bad-security';
+                else
+                  failureType = 'unresponsive-server';
+                callback(failureType, null, failureDetails);
+              });
+            return;
           }
           callback(failureType, null, failureDetails);
           return;
@@ -3227,9 +3603,14 @@ exports.configurator = {
         var accountDef = {
           id: accountId,
           name: userDetails.accountName || userDetails.emailAddress,
+          defaultPriority: $date.NOW(),
 
           type: 'activesync',
           syncRange: 'auto',
+
+          syncInterval: userDetails.syncInterval || 0,
+          notifyOnNew: userDetails.hasOwnProperty('notifyOnNew') ?
+                       userDetails.notifyOnNew : true,
 
           credentials: credentials,
           connInfo: {
@@ -3269,6 +3650,9 @@ exports.configurator = {
 
       type: 'activesync',
       syncRange: oldAccountDef.syncRange,
+      syncInterval: oldAccountDef.syncInterval || 0,
+      notifyOnNew: oldAccountDef.hasOwnProperty('notifyOnNew') ?
+                   oldAccountDef.notifyOnNew : true,
 
       credentials: credentials,
       connInfo: {
@@ -3307,4 +3691,5 @@ exports.configurator = {
   },
 };
 
-}); // end define;
+}); // end define
+;

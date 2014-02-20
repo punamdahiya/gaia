@@ -1,9 +1,9 @@
 requireLib('models/account.js');
 requireLib('presets.js');
 requireLib('store/setting.js');
+requireElements('calendar/elements/advanced_settings.html');
 
 suiteGroup('Views.AdvancedSettings', function() {
-
   var subject;
   var template;
   var app;
@@ -26,7 +26,7 @@ suiteGroup('Views.AdvancedSettings', function() {
     });
   });
 
-  suiteSetup(function() {
+  setup(function() {
     fixtures = {
       a: Factory('account', {
         _id: 'a',
@@ -52,31 +52,12 @@ suiteGroup('Views.AdvancedSettings', function() {
     );
   }
 
-  teardown(function() {
-    var el = document.getElementById('test');
-    el.parentNode.removeChild(el);
+  var db;
+  suiteTemplate('advanced-settings', {
+    id: 'advanced-settings-view'
   });
 
-  var db;
   setup(function(done) {
-    var div = document.createElement('div');
-    div.id = 'test';
-    div.innerHTML = [
-      '<div id="advanced-settings-view">',
-        '<ul class="account-list"></ul>',
-      '</div>',
-      '<select name="syncFrequency" id="setting-sync-frequency">',
-        '<option value="null">null</option>',
-        '<option value="15">15</option>',
-        '<option value="30">30</option>',
-        '<option selected value="60">60</option>',
-      '</select>',
-      '<div id="default-event-alarm"><span class="button"></span></div>',
-      '<div id="default-allday-alarm"><span class="button"></span></div>'
-    ].join('');
-
-    document.body.appendChild(div);
-
     app = testSupport.calendar.app();
     db = app.db;
 
@@ -144,44 +125,69 @@ suiteGroup('Views.AdvancedSettings', function() {
       accountStore.emit('add', object._id, object);
     });
 
-    test('#add', function() {
-      var item = children[children.length - 1];
+    suite('account store: add', function() {
+      test('success', function() {
+        assert.ok(children.length, 'adds child');
+        assert.ok(
+          !children[0].classList.contains('error'),
+          'is without error'
+        );
+      });
 
-      assert.equal(
-        item.outerHTML,
-        modelHtml(object)
-      );
+      test('with error', function() {
+        fixtures.b.error = {};
+        accountStore.emit('add', 'foo', fixtures.b);
+        delete fixtures.b.error;
+
+        var container = children[children.length - 1];
+        assert.ok(container.classList.contains('error'), 'adds error class');
+      });
+
+      test('local provider', function() {
+        accountStore.emit('add', 'foo', Factory('account', {
+          providerType: 'Local'
+        }));
+
+        assert.length(children, 1, 'does not add account');
+      });
     });
 
-    test('add - Local provider', function() {
-      accountStore.emit('add', 'foo', Factory('account', {
-        providerType: 'Local'
-      }));
+    suite('account store: update', function() {
+      test('add / remove error', function() {
+        var classList = children[0].classList;
 
-      assert.length(children, 1, 'does not add account');
+        object.error = {};
+        accountStore.emit('update', object._id, object);
+        assert.ok(classList.contains('error'), 'adds error');
+
+        object.error = undefined;
+        accountStore.emit('update', object._id, object);
+        assert.ok(!classList.contains('error'), 'removes error');
+      });
     });
 
-    test('remove - missing id', function() {
-      accountStore.emit('remove', 'foo');
+    suite('account store: remove', function() {
+      test('missing id', function() {
+        accountStore.emit('remove', 'foo');
+      });
+
+      test('remove', function() {
+        // add a new one first
+        accountStore.emit('add', fixtures.b._id, fixtures.b);
+
+        assert.equal(children.length, 2);
+
+        // remove the old one
+        accountStore.emit('preRemove', object._id);
+
+        assert.equal(children.length, 1);
+
+        assert.equal(
+          children[0].outerHTML,
+          modelHtml(fixtures.b)
+        );
+      });
     });
-
-    test('remove', function() {
-      // add a new one first
-      accountStore.emit('add', fixtures.b._id, fixtures.b);
-
-      assert.equal(children.length, 2);
-
-      // remove the old one
-      accountStore.emit('remove', object._id);
-
-      assert.equal(children.length, 1);
-
-      assert.equal(
-        children[0].outerHTML,
-        modelHtml(fixtures.b)
-      );
-    });
-
   });
 
   suite('#handleSettingUiChange', function() {
@@ -260,9 +266,14 @@ suiteGroup('Views.AdvancedSettings', function() {
       }
     });
 
+    // stage error
+    setup(function(done) {
+      fixtures.b.error = {};
+      accountStore.persist(fixtures.b, done);
+    });
+
     setup(function(done) {
       list = subject.accountList;
-      accountStore._cached = fixtures;
 
       subject.render();
       subject.onrender = done;
@@ -281,7 +292,12 @@ suiteGroup('Views.AdvancedSettings', function() {
 
     test('accounts', function() {
       checkItem(0, 'a');
-      checkItem(1, 'b');
+
+      var errorChild = list.children[1];
+      assert.ok(
+        errorChild.classList.contains('error'),
+        'has error'
+      );
     });
 
     test('syncFrequency', function() {

@@ -1,4 +1,5 @@
 requireApp('calendar/test/unit/service/helper.js');
+requireLib('presets.js');
 requireLib('ext/ical.js');
 requireLib('ext/caldav.js');
 requireLib('ext/uuid.js');
@@ -18,7 +19,6 @@ suite('service/caldav', function() {
 
   // setup fixtures...
   suiteSetup(function(done) {
-    this.timeout(10000);
     ServiceSupport.setExpansionLimit(100);
 
     fixtures = new ServiceSupport.Fixtures('ical');
@@ -107,6 +107,34 @@ suite('service/caldav', function() {
         calledWith,
         [1, 2, 3, 4],
         'should route event to: ' + event
+      );
+    });
+  });
+
+  suite('#_createConnection', function() {
+    test('with oauth present', function() {
+      var account = Factory.build('account', {
+        preset: 'google'
+      });
+
+      var connection = subject._createConnection(account);
+      assert.equal(
+        connection.httpHandler,
+        Caldav.Http.OAuth2,
+        'google uses oauth'
+      );
+    });
+
+    test('without oauth preset', function() {
+      var account = Factory.build('account', {
+        preset: 'caldav'
+      });
+
+      var connection = subject._createConnection(account);
+      assert.equal(
+        connection.httpHandler,
+        Caldav.Http.BasicAuth,
+        'default authentication is basic auth'
       );
     });
   });
@@ -293,6 +321,73 @@ suite('service/caldav', function() {
     });
   });
 
+  suite('#adjustAbsoluteAlarms', function() {
+    parseFixture('singleEvent');
+
+    var component;
+    var relativeAlarm;
+    var absoluteAlarm;
+    var absoluteTriggerTime;
+
+    setup(function() {
+      component = icalEvent.component;
+
+      // remove all previous subcomponents
+      component.removeAllSubcomponents('valarm');
+
+      // create a relative alarm
+      relativeAlarm = new ICAL.Component('valarm');
+      // 5 minutes before
+      relativeAlarm.addPropertyWithValue('trigger', '-PT5M');
+      relativeAlarm.addPropertyWithValue('action', 'EMAIL');
+
+      absoluteAlarm = new ICAL.Component('valarm');
+
+      absoluteTriggerTime = icalEvent.startDate.clone();
+      absoluteTriggerTime.day -= 1;
+
+      absoluteAlarm.addPropertyWithValue(
+        'trigger',
+        absoluteTriggerTime
+      );
+
+      component.addSubcomponent(relativeAlarm);
+      component.addSubcomponent(absoluteAlarm);
+    });
+
+    test('changes alarm times', function() {
+      var originalDate = icalEvent.startDate.clone();
+      var newDate = icalEvent.startDate;
+
+      newDate.timezone = ICAL.Timezone.localTimezone;
+      newDate.isDate = true;
+      newDate.day += 10;
+
+      var expectedDuration = absoluteAlarm.getFirstPropertyValue('trigger').
+          subtractDate(originalDate);
+
+      subject.adjustAbsoluteAlarms(originalDate, icalEvent);
+
+      // sanity check
+      assert.equal(
+        relativeAlarm.getFirstPropertyValue('trigger'),
+        '-PT5M',
+        'relative times should be unchanged'
+      );
+
+      // should be same as original alarm timezone
+      var expectedDate = newDate.clone();
+      expectedDate.isDate = false;
+      expectedDate.timezone = originalDate.timezone;
+      expectedDate.day -= 1;
+
+      assert.equal(
+        absoluteAlarm.getFirstPropertyValue('trigger').toString(),
+        expectedDuration.toString()
+      );
+    });
+  });
+
   suite('#_displayAlarms', function() {
     suite('multiple instances of alarms', function() {
       // 5 minutes prior
@@ -405,11 +500,14 @@ suite('service/caldav', function() {
   test('#getAccount', function(done) {
     var calledWith;
     var given = Factory('caldav.account');
+    var oauth = { x: true };
     var result = {
       url: '/myfoobar/'
     };
 
-    subject._requestHome = function() {
+    subject._requestHome = function(connection, url) {
+      connection.oauth = oauth;
+      connection.user = 'newuser';
       calledWith = arguments;
       return {
         send: function(callback) {
@@ -424,6 +522,9 @@ suite('service/caldav', function() {
       done(function() {
         assert.ok(!err, 'should succeed');
         assert.equal(data.calendarHome, result.url);
+        assert.equal(data.oauth, calledWith[0].oauth);
+        assert.equal(data.user, calledWith[0].user);
+
         assert.instanceOf(calledWith[0], Caldav.Connection);
         assert.equal(calledWith[0].domain, given.domain);
         assert.equal(calledWith[1], given.entrypoint);
@@ -797,11 +898,14 @@ suite('service/caldav', function() {
     var calledHandle = [];
     var calledWith;
 
+    var errResult;
+
     setup(function() {
+      errResult = null;
       calledHandle.length = 0;
       var realRequest = subject._requestEvents;
-      var givenCal = Factory('caldav.calendar');
-      var givenAcc = Factory('caldav.account');
+      givenCal = Factory('caldav.calendar');
+      givenAcc = Factory('caldav.account');
 
       subject._handleCaldavEvent = function() {
         var args = Array.prototype.slice.call(arguments);
@@ -821,13 +925,45 @@ suite('service/caldav', function() {
         query.send = function() {
           var cb = arguments[arguments.length - 1];
           setTimeout(function() {
-            cb(null);
+            cb(errResult);
           }, 0);
         };
 
         // return real query
         return query;
       };
+    });
+
+    test('authentication error', function(done) {
+      var stream = new Calendar.Responder();
+      var options = {
+        startDate: new Date(2012, 0, 1),
+        cached: {
+          'two/': { id: '2', syncToken: 'two' }
+        }
+      };
+
+      // will be sent in the callback
+      errResult = new Error();
+
+      stream.on(
+        'missingEvents',
+        done.bind(this, new Error('must not emit events'))
+      );
+
+      function handler(err) {
+        done(function() {
+          assert.equal(err, errResult, 'sends error');
+        });
+      }
+
+      subject.streamEvents(
+        givenAcc,
+        givenCal,
+        options,
+        stream,
+        handler
+      );
     });
 
     test('empty response', function(done) {
@@ -1376,6 +1512,7 @@ suite('service/caldav', function() {
       var start = new Date(2012, 1, 1);
       var end = new Date(2012, 1, 2);
       var result;
+      var errResult;
       var putCall;
 
       setup(function(done) {
@@ -1398,6 +1535,7 @@ suite('service/caldav', function() {
           event,
           function(err, remote) {
             result = remote;
+            errResult = err;
             done();
           }
         );

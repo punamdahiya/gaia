@@ -1,4 +1,5 @@
 (function(window) {
+  var CALENDAR_PREFIX = 'calendar-';
 
   var template = Calendar.Templates.Calendar;
   var _super = Calendar.View.prototype;
@@ -49,26 +50,6 @@
       return this._findElement('timeViews');
     },
 
-    handleEvent: function(event) {
-      switch (event.type) {
-
-        // calendar updated
-        case 'update':
-          this._update.apply(this, event.data);
-          break;
-
-        // calendar added
-        case 'add':
-          this._add.apply(this, event.data);
-          break;
-
-        // calendar removed
-        case 'remove':
-          this._remove.apply(this, event.data);
-          break;
-      }
-    },
-
     _observeUI: function() {
       this.syncButton.addEventListener('click', this._onSyncClick.bind(this));
 
@@ -77,13 +58,28 @@
       );
     },
 
-    _observeStore: function() {
+    _observeAccountStore: function() {
+      var store = this.app.store('Account');
+      var handler = this._updateSyncButton.bind(this);
+
+      store.on('add', handler);
+      store.on('remove', handler);
+    },
+
+    _observeCalendarStore: function() {
       var store = this.app.store('Calendar');
+      var self = this;
+
+      function handle(method) {
+        return function() {
+          self[method].apply(self, arguments);
+        }
+      }
 
       // calendar store events
-      store.on('update', this);
-      store.on('add', this);
-      store.on('remove', this);
+      store.on('update', handle('_update'));
+      store.on('add', handle('_add'));
+      store.on('remove', handle('_remove'));
     },
 
     _persistCalendarDisplay: function(id, displayed) {
@@ -140,25 +136,41 @@
     },
 
     _update: function(id, model) {
-      var htmlId = 'calendar-' + id;
-      var el = document.getElementById(htmlId);
+      var el = document.getElementById(this.idForModel(CALENDAR_PREFIX, id));
       var check = el.querySelector('input[type="checkbox"]');
+
+      if (el.classList.contains(Calendar.ERROR) && !model.error) {
+        el.classList.remove(Calendar.ERROR);
+      }
+
+      if (model.error) {
+        el.classList.add(Calendar.ERROR);
+      }
 
       el.querySelector(this.selectors.calendarName).textContent = model.name;
       check.checked = model.localDisplayed;
     },
 
     _add: function(id, object) {
+      var idx = this.calendars.children.length;
+
       var html = template.item.render(object);
       this.calendars.insertAdjacentHTML(
         'beforeend',
         html
       );
+
+      if (object.error) {
+        var el = this.calendars.children[
+          idx
+        ];
+
+        el.classList.add(Calendar.ERROR);
+      }
     },
 
     _remove: function(id) {
-      var htmlId = 'calendar-' + id;
-      var el = document.getElementById(htmlId);
+      var el = document.getElementById(this.idForModel(CALENDAR_PREFIX, id));
       if (el) {
         el.parentNode.removeChild(el);
       }
@@ -185,13 +197,38 @@
         }
 
         // observe new calendar events
-        this._observeStore();
+        this._observeCalendarStore();
 
-        if (this.onrender) {
-          this.onrender();
+        // observe accounts to hide sync button
+        this._observeAccountStore();
+
+        // show/hide sync button
+        this._updateSyncButton(function() {
+          if (this.onrender) {
+            this.onrender();
+          }
+        }.bind(this));
+      }.bind(this));
+    },
+
+    _updateSyncButton: function(callback) {
+      var store = this.app.store('Account');
+      var element = this.syncButton;
+      var self = this;
+
+      store.syncableAccounts(function(err, list) {
+        if (err) return callback(err);
+
+        if (list.length === 0) {
+          element.classList.remove(Calendar.ACTIVE);
+        } else {
+          element.classList.add(Calendar.ACTIVE);
         }
 
-      }.bind(this));
+        // test only event
+        self.onupdatesyncbutton && self.onupdatesyncbutton();
+        typeof callback === 'function' ? callback() : '';
+      });
     },
 
     /**
@@ -219,3 +256,4 @@
   Calendar.ns('Views').Settings = Settings;
 
 }(this));
+

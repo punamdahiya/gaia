@@ -5,25 +5,22 @@ requireApp('system/js/updatable.js');
 requireApp('system/test/unit/mock_app.js');
 requireApp('system/test/unit/mock_asyncStorage.js');
 requireApp('system/test/unit/mock_update_manager.js');
-requireApp('system/test/unit/mock_window_manager.js');
+requireApp('system/test/unit/mock_app_window_manager.js');
 requireApp('system/test/unit/mock_apps_mgmt.js');
 requireApp('system/test/unit/mock_chrome_event.js');
 requireApp('system/test/unit/mock_custom_dialog.js');
 requireApp('system/test/unit/mock_utility_tray.js');
-requireApp('system/test/unit/mock_manifest_helper.js');
-requireApp('system/test/unit/mocks_helper.js');
+requireApp('system/shared/test/unit/mocks/mock_manifest_helper.js');
 
 
 var mocksHelperForUpdatable = new MocksHelper([
   'CustomDialog',
   'UpdateManager',
-  'WindowManager',
+  'AppWindowManager',
   'UtilityTray',
   'ManifestHelper',
   'asyncStorage'
-]);
-
-mocksHelperForUpdatable.init();
+]).init();
 
 suite('system/Updatable', function() {
   var subject;
@@ -33,11 +30,10 @@ suite('system/Updatable', function() {
   var realL10n;
   var realMozApps;
 
-  var mocksHelper = mocksHelperForUpdatable;
-
   var lastDispatchedEvent = null;
   var fakeDispatchEvent;
 
+  mocksHelperForUpdatable.attachTestHelpers();
   suiteSetup(function() {
     realL10n = navigator.mozL10n;
     navigator.mozL10n = {
@@ -50,14 +46,11 @@ suite('system/Updatable', function() {
     // but now, this seems to work and feels cleaner
     realMozApps = navigator.mozApps;
     navigator.mozApps = { mgmt: MockAppsMgmt };
-
-    mocksHelper.suiteSetup();
   });
 
   suiteTeardown(function() {
     navigator.mozL10n = realL10n;
     navigator.mozApps = realMozApps;
-    mocksHelper.suiteTeardown();
   });
 
   setup(function() {
@@ -71,13 +64,10 @@ suite('system/Updatable', function() {
       };
     };
     subject._dispatchEvent = fakeDispatchEvent;
-
-    mocksHelper.setup();
   });
 
   teardown(function() {
     MockAppsMgmt.mTeardown();
-    mocksHelper.teardown();
 
     subject._dispatchEvent = realDispatchEvent;
     lastDispatchedEvent = null;
@@ -149,7 +139,7 @@ suite('system/Updatable', function() {
       });
 
       test('should kill the app if downloaded', function() {
-        assert.equal(MockWindowManager.mLastKilledOrigin, mockApp.origin);
+        assert.equal(MockAppWindowManager.mLastKilledOrigin, mockApp.origin);
       });
     });
 
@@ -330,6 +320,13 @@ suite('system/Updatable', function() {
                        mockApp.mId);
         });
 
+        test('should call downloaded of UpdateManager', function() {
+          mockApp.mTriggerDownloadAvailable();
+          mockApp.mTriggerDownloadProgress(42);
+          mockApp.mTriggerDownloadSuccess();
+          assert.isTrue(MockUpdateManager.mDownloadedCalled);
+        });
+
         test('should not remove self if not downloading', function() {
           mockApp.mTriggerDownloadSuccess();
           assert.isNull(MockUpdateManager.mLastDownloadsRemoval);
@@ -347,7 +344,7 @@ suite('system/Updatable', function() {
         suite('application of the download', function() {
           test('should apply if the app is not in foreground', function() {
             mockApp.mTriggerDownloadAvailable();
-            MockWindowManager.mDisplayedApp =
+            MockAppWindowManager.mDisplayedApp =
               'http://homescreen.gaiamobile.org';
             mockApp.mTriggerDownloadSuccess();
             assert.isNotNull(MockAppsMgmt.mLastAppApplied);
@@ -357,7 +354,7 @@ suite('system/Updatable', function() {
           test('should wait for appwillclose if it is', function() {
             var origin = 'http://testapp.gaiamobile.org';
             mockApp.origin = origin;
-            MockWindowManager.mDisplayedApp = origin;
+            MockAppWindowManager.mDisplayedApp = origin;
 
             mockApp.mTriggerDownloadAvailable();
             mockApp.mTriggerDownloadSuccess();
@@ -376,7 +373,7 @@ suite('system/Updatable', function() {
             mockApp.mTriggerDownloadAvailable();
             mockApp.mTriggerDownloadSuccess();
             assert.equal('https://testapp.gaiamobile.org',
-                         MockWindowManager.mLastKilledOrigin);
+                         MockAppWindowManager.mLastKilledOrigin);
           });
         });
       });
@@ -464,6 +461,10 @@ suite('system/Updatable', function() {
 
         test('should reset the downloading flag', function() {
           assert.isFalse(subject.downloading);
+        });
+
+        test('should signal the UpdateManager', function() {
+          assert.isTrue(MockUpdateManager.mDownloadedCalled);
         });
 
         test('should reset SystemUpdatable.KNOWN_UPDATE_FLAG', function() {

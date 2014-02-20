@@ -62,9 +62,16 @@ body[role="application"] [role="dialog"] {
 
 /* Content */
 #firsttime-view .content {
-  padding: 3.5rem 1.5rem 0;
+  padding: 0 1.5rem 0;
+  margin-top: 3.5rem;
   list-style: none;
-  margin: 0;
+}
+
+/* Wrapper with scroll */
+#firsttime-view section.content {
+  -moz-box-sizing: border-box;
+  max-height: calc(100% - 5rem - 3.5rem - 6.8rem); /* window height - header height - steps progress - menu height  */
+  overflow-x: auto;
 }
 
 #firsttime-view .content h2 {
@@ -82,7 +89,7 @@ body[role="application"] [role="dialog"] {
   left: 0;
   right: 0;
   bottom: 0;
-  border-top: solid 0.1rem #a6a6a6;
+  border-top: solid 0.1rem #e7e7e7;
   padding: 1.5rem;
   /* Legacy unstable BB */
   background: transparent;
@@ -100,7 +107,7 @@ body[role="application"] [role="dialog"] {
   float: left;
   width: 1.3rem;
   height: 2.5rem;
-  margin: 0.7rem -1rem 0;
+  margin: 0.7rem -0.5rem 0;
   background: url(../images/app/icons/prev.png) no-repeat center center / 1.3rem;
 }
 
@@ -116,7 +123,6 @@ body[role="application"] [role="dialog"] {
     border-bottom: 0.1rem solid #d0d0d0;
     position: relative;
     color: #fff;
-    font-family: 'MozTT', Sans-serif;
     font-weight: lighter;
     font-size: 1.6rem;
     height: 5.9rem;
@@ -142,7 +148,8 @@ body[role="application"] [role="dialog"] {
   #firsttime-view .choices li[aria-checked="true"] span {
     font-weight: 600;
     padding-right: 0.5rem;
-    background: url(../images/app/icons/checked.png) content-box right center no-repeat / 1.9rem;
+    background: url(../images/app/icons/checked.png) content-box right center no-repeat;
+    background-size: 1.9rem;
   }
 
   #firsttime-view .choices li label {
@@ -161,14 +168,6 @@ body[role="application"] [role="dialog"] {
 #firsttime-view .settings li {
   padding-left: 0;
   padding-right: 0;
-}
-
-#firsttime-view .settings li label.end {
-  margin-right: 0.5rem;
-}
-
-#firsttime-view .settings li > .end {
-  right: 0;
 }
 
 .step-hint {

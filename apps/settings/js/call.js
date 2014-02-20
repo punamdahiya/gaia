@@ -3,11 +3,10 @@
 
 'use strict';
 
-// Handle call settings.
-var Calls = (function(window, document, undefined) {
-  var _ = navigator.mozL10n.get;
-
-  // Must be in sync with nsIDOMMozMobileCFInfo interface.
+/**
+ * Singleton object that handles some call settings.
+ */
+var CallSettings = (function(window, document, undefined) {
   var _cfReason = {
     CALL_FORWARD_REASON_UNCONDITIONAL: 0,
     CALL_FORWARD_REASON_MOBILE_BUSY: 1,
@@ -28,11 +27,124 @@ var Calls = (function(window, document, undefined) {
     CALL_FORWARD_ACTION_ERASURE: 4
   };
 
-  var mobileConnection = getMobileConnection();
-  var settings = window.navigator.mozSettings;
-  var _voiceServiceClassMask = mobileConnection.ICC_SERVICE_CLASS_VOICE;
+  var _clirConstantsMapping = {
+    'CLIR_DEFAULT': 0,
+    'CLIR_INVOCATION': 1,
+    'CLIR_SUPPRESSION': 2
+  };
 
-  function isPhoneNumberValid(number) {
+  var _ = window.navigator.mozL10n.get;
+  var _settings = window.navigator.mozSettings;
+  var _mobileConnections = window.navigator.mozMobileConnections;
+
+  /** mozMobileConnection instance the panel settings rely on */
+  var _mobileConnection = null;
+  /** Voice service class mask */
+  var _voiceServiceClassMask = null;
+  /** Stores current states (enabler or not) of the call forwaring reason */
+  var _cfReasonStates = [0, 0, 0, 0];
+  /** Flag */
+  var _ignoreSettingChanges = false;
+  /** Flag */
+  var _getCallForwardingOptionSuccess = true;
+  /** Flag */
+  var _updatingInProgress = false;
+
+  /**
+   * Init function.
+   */
+  function cs_init() {
+    // Get the mozMobileConnection instace for this ICC card.
+    _mobileConnection = _mobileConnections[
+      DsdsSettings.getIccCardIndexForCallSettings()
+    ];
+    if (!_mobileConnection) {
+      return;
+    }
+
+    _voiceServiceClassMask = _mobileConnection.ICC_SERVICE_CLASS_VOICE;
+
+    // Set the navigation correctly when on a multi ICC card device.
+    if (DsdsSettings.getNumberOfIccSlots() > 1) {
+      var callSettingsPanel = document.getElementById('call');
+      var backButton = callSettingsPanel.querySelector('a');
+      backButton.setAttribute('href', '#call-iccs');
+    }
+
+    // Init call setting stuff.
+    cs_initVoiceMailSettings();
+    cs_initVoicePrivacyMode();
+    cs_initCallWaiting();
+    cs_initCallerId();
+    cs_initCallForwarding();
+    window.setTimeout(cs_initCallForwardingObservers, 500);
+
+    // Update items in the call settings panel.
+    window.addEventListener('panelready', function(e) {
+      // Get the mozMobileConnection instace for this ICC card.
+      _mobileConnection = _mobileConnections[
+        DsdsSettings.getIccCardIndexForCallSettings()
+      ];
+      if (!_mobileConnection) {
+        return;
+      }
+
+      switch (e.detail.current) {
+        case '#call':
+          // No need to refresh the call settings items if navigated from
+          // panels not manipulating call settings.
+          if (e.detail.previous.startsWith('#call-cf-') ||
+              e.detail.previous === '#call-voiceMailSettings') {
+            return;
+          }
+          cs_refreshCallSettingItems();
+          break;
+        case '#call-voiceMailSettings':
+          // If current panel is 'Voicemail Settings', focus input field to
+          // trigger showing the keyboard
+          var voicemailNumberInput = document.getElementById('vm-number');
+          var cursorPos = voicemailNumberInput.value.length;
+          voicemailNumberInput.focus();
+          voicemailNumberInput.setSelectionRange(0, cursorPos);
+          break;
+      }
+    });
+
+    // We need to refresh call setting items as they can be changed in dialer.
+    document.addEventListener('visibilitychange', function() {
+      if (!document.hidden && Settings.currentPanel === '#call') {
+        cs_refreshCallSettingItems();
+      }
+    });
+
+    cs_refreshCallSettingItems();
+  }
+
+  /**
+   * Refresh the items in the call setting panel.
+   */
+  function cs_refreshCallSettingItems() {
+    if (!_updatingInProgress) {
+      cs_updateVoiceMailItemState();
+      cs_updateFdnStatus();
+      cs_updateCallerIdItemState(
+        function panelready_updateCallerIdItemState() {
+          cs_updateCallWaitingItemState(
+            function panelready_updateCallWaitingItemState() {
+              cs_updateCallForwardingSubpanels();
+          });
+      });
+    }
+  }
+
+  /**
+   * Helper function. Check whether the phone number is valid or not.
+   *
+   * @param {String} number The phone number to check.
+   *
+   * @return {Boolean} Result.
+   */
+  function cs_isPhoneNumberValid(number) {
     if (number) {
       var re = /^([\+]*[0-9])+$/;
       if (re.test(number)) {
@@ -42,19 +154,21 @@ var Calls = (function(window, document, undefined) {
     return false;
   }
 
-  // Stores settings into the database.
-  function setToSettingsDB(settingKey, value, callback) {
+  /**
+   * Helper function. Stores settings into the database.
+   */
+  function cs_setToSettingsDB(settingKey, value, callback) {
     var done = function done() {
       if (callback)
         callback();
     };
 
-    var getLock = settings.createLock();
+    var getLock = _settings.createLock();
     var request = getLock.get(settingKey);
     request.onsuccess = function getFromDBSuccess() {
       var currentValue = request.result[settingKey];
       if (currentValue !== value) {
-        var setLock = settings.createLock();
+        var setLock = _settings.createLock();
         var cset = {};
         cset[settingKey] = value;
         var setRequest = setLock.set(cset);
@@ -67,8 +181,10 @@ var Calls = (function(window, document, undefined) {
     request.onerror = done;
   }
 
-  // Displays rule info.
-  function displayRule(rules, elementId, settingKey) {
+  /**
+   * Helper function. Displays rule info.
+   */
+  function cs_displayRule(rules, elementId, settingKey) {
     var element = document.getElementById(elementId);
     for (var i = 0; i < rules.length; i++) {
       if (rules[i].active &&
@@ -83,98 +199,78 @@ var Calls = (function(window, document, undefined) {
     element.textContent = _('callForwardingNotForwarding');
     element.dataset.l10nId = 'callForwardingNotForwarding';
     document.getElementById('cf-' + settingKey + '-number').disabled = false;
-  };
+  }
 
-  // Enables/disables tapping on call forwarding entry.
-  function enableTapOnCallForwardingItems(enable) {
+  /**
+   * Helper function. Enables/disables tapping on call forwarding entry.
+   */
+  function cs_enableTapOnCallForwardingItems(enable) {
     var elementIds = ['li-cfu-desc',
                       'li-cfmb-desc',
                       'li-cfnrep-desc',
                       'li-cfnrea-desc'];
-    elementIds.forEach(function(id) {
-      if (enable)
-        document.getElementById(id).classList.remove('disabled');
-      else
-        document.getElementById(id).classList.add('disabled');
-    });
-  };
+    var isUnconditionalCFOn = (_cfReasonStates[0] === 1);
 
-  // Displays what's happening while requesting call forwarding info.
-  function displayInfoForAll(what) {
+    elementIds.forEach(function(id) {
+      var element = document.getElementById(id);
+      if (enable) {
+        element.removeAttribute('aria-disabled');
+        // If unconditional call forwarding is on we keep disabled the other
+        // panels.
+        if (isUnconditionalCFOn && id !== 'li-cfu-desc') {
+          element.setAttribute('aria-disabled', true);
+        }
+      } else {
+        document.getElementById(id).setAttribute('aria-disabled', true);
+      }
+    });
+  }
+
+  /**
+   * Display information relevant to the SIM card state.
+   */
+  function cs_displayInfoForAll(what) {
     document.getElementById('cfu-desc').textContent =
       document.getElementById('cfmb-desc').textContent =
         document.getElementById('cfnrep-desc').textContent =
           document.getElementById('cfnrea-desc').textContent =
             what;
-  };
+  }
 
-  // Display information relevant to the SIM card state
-  function displaySimCardStateInfo() {
-    var simCardState = mobileConnection.cardState;
-    /**
-     * Check SIM card state
-     * Possible values: null, 'unknown', 'absent', 'pinRequired',
-     * 'pukRequired', 'networkLocked', 'ready'.
-     */
-    switch (simCardState) {
-      case 'absent':
-        displayInfoForAll(_('noSimCard'));
-        break;
-      case 'pinRequired':
-        displayInfoForAll(_('simCardLockedMsg'));
-        break;
-      case 'pukRequired':
-        displayInfoForAll(_('simCardLockedMsg'));
-        break;
-      case 'networkLocked':
-        displayInfoForAll(_('simLockedPhone'));
-        break;
-      case 'unknown':
-        displayInfoForAll(_('unknownSimCardState'));
-        break;
-      case null:
-        displayInfoForAll(_('simCardNotReady'));
-        break;
-      default:
-        // For any other case (including 'ready') display
-        // the call forwarding network request message
-        displayInfoForAll(_('callForwardingRequesting'));
-    }
-  };
-
-  // Stores current states (enabler or not) of the call forwaring reason.
-  var _cfReasonStates = [0, 0, 0, 0];
-  var ignoreSettingChanges = false;
-  // Gets current call forwarding rules.
-  function getCallForwardingOption(callback) {
+  /**
+   * Gets current call forwarding rules.
+   */
+  function cs_getCallForwardingOption(callback) {
     var onerror = function call_getCWOptionError() {
-      if (callback)
+      if (callback) {
+        _ignoreSettingChanges = false;
         callback(null);
+      }
     };
 
     // Queries rules for unconditional call forwarding.
-    var unconditional = mobileConnection.getCallForwardingOption(
+    var unconditional = _mobileConnection.getCallForwardingOption(
       _cfReason.CALL_FORWARD_REASON_UNCONDITIONAL);
 
     unconditional.onsuccess = function() {
       var unconditionalRules = unconditional.result;
 
       // Queries rules for call forwarding when device busy.
-      var mobileBusy = mobileConnection.getCallForwardingOption(
+      var mobileBusy = _mobileConnection.getCallForwardingOption(
         _cfReason.CALL_FORWARD_REASON_MOBILE_BUSY);
 
       mobileBusy.onsuccess = function() {
         var mobileBusyRules = mobileBusy.result;
 
         // Queries rules for call forwarding when device does not reply.
-        var noReply = mobileConnection.getCallForwardingOption(
+        var noReply = _mobileConnection.getCallForwardingOption(
           _cfReason.CALL_FORWARD_REASON_NO_REPLY);
 
         noReply.onsuccess = function() {
           var noReplyRules = noReply.result;
 
           // Queries rules for call forwarding when device is not reachable.
-          var notReachable = mobileConnection.getCallForwardingOption(
+          var notReachable = _mobileConnection.getCallForwardingOption(
             _cfReason.CALL_FORWARD_REASON_NOT_REACHABLE);
 
           notReachable.onsuccess = function() {
@@ -205,7 +301,7 @@ var Calls = (function(window, document, undefined) {
               },
               finish: function() {
                 setTimeout(function() {
-                  ignoreSettingChanges = false;
+                  _ignoreSettingChanges = false;
                   callback(cfOptions);
                 }, 500);
               }
@@ -213,7 +309,7 @@ var Calls = (function(window, document, undefined) {
 
             // While storing the settings into the database we avoid observing
             // changes on those ones and enabling/disabling call forwarding.
-            ignoreSettingChanges = true;
+            _ignoreSettingChanges = true;
             // Ensures the settings being set to the setting DB.
             Object.keys(cfOptions).forEach(function(settingKey) {
               var rules = cfOptions[settingKey];
@@ -223,18 +319,18 @@ var Calls = (function(window, document, undefined) {
                   ((_voiceServiceClassMask & rules[i].serviceClass) != 0)) {
                   _cfReasonStates[_cfReasonMapping[settingKey]] = 1;
                   asyncOpChecker.runTask(
-                    setToSettingsDB,
+                    cs_setToSettingsDB,
                     'ril.cf.' + settingKey + '.number',
                     rules[i].number
                   );
                   asyncOpChecker.runTask(
-                    setToSettingsDB,
+                    cs_setToSettingsDB,
                     'ril.cf.' + settingKey + '.enabled',
                     true
                   );
                   if (settingKey === 'unconditional') {
                     asyncOpChecker.runTask(
-                      setToSettingsDB,
+                      cs_setToSettingsDB,
                       'ril.cf.carrier.enabled',
                       true
                     );
@@ -247,18 +343,18 @@ var Calls = (function(window, document, undefined) {
               if (!hasValidRule) {
                 _cfReasonStates[_cfReasonMapping[settingKey]] = 0;
                 asyncOpChecker.runTask(
-                  setToSettingsDB,
+                  cs_setToSettingsDB,
                   'ril.cf.' + settingKey + '.number',
                   ''
                 );
                 asyncOpChecker.runTask(
-                  setToSettingsDB,
+                  cs_setToSettingsDB,
                   'ril.cf.' + settingKey + '.enabled',
                   false
                 );
                 if (settingKey === 'unconditional') {
                   asyncOpChecker.runTask(
-                    setToSettingsDB,
+                    cs_setToSettingsDB,
                     'ril.cf.carrier.enabled',
                     false
                   );
@@ -275,45 +371,23 @@ var Calls = (function(window, document, undefined) {
     unconditional.onerror = onerror;
   };
 
-  var updatingInProgress = false;
-  function updateCallForwardingSubpanels() {
-    updatingInProgress = true;
-
-    displaySimCardStateInfo();
-    enableTapOnCallForwardingItems(false);
-    getCallForwardingOption(function got_cfOption(cfOptions) {
-      if (cfOptions) {
-        displayRule(cfOptions['unconditional'], 'cfu-desc', 'unconditional');
-        displayRule(cfOptions['mobilebusy'], 'cfmb-desc', 'mobilebusy');
-        displayRule(cfOptions['noreply'], 'cfnrep-desc', 'noreply');
-        displayRule(cfOptions['notreachable'], 'cfnrea-desc', 'notreachable');
-        enableTapOnCallForwardingItems(true);
-      } else {
-        displaySimCardStateInfo();
-        enableTapOnCallForwardingItems(false);
-      }
-      updatingInProgress = false;
-    });
-  }
-
-  function initCallForwardingObservers() {
+  /**
+   *
+   */
+  function cs_initCallForwardingObservers() {
     var settingKeys = ['unconditional',
                        'mobilebusy',
                        'noreply',
                        'notreachable'];
     settingKeys.forEach(function(key) {
-      settings.addObserver('ril.cf.' + key + '.enabled', function(event) {
+      _settings.addObserver('ril.cf.' + key + '.enabled', function(event) {
         // While storing the settings into the database we avoid observing
         // changes on those ones and enabling/disabling call forwarding.
-        if (ignoreSettingChanges) {
+        if (_ignoreSettingChanges) {
           return;
         }
         // Bails out in case the reason is already enabled/disabled.
         if (_cfReasonStates[_cfReasonMapping[key]] == event.settingValue) {
-          return;
-        }
-        // Bails out in case of airplane mode.
-        if (mobileConnection.cardState !== 'ready') {
           return;
         }
         var selector = 'input[data-setting="ril.cf.' + key + '.number"]';
@@ -324,96 +398,228 @@ var Calls = (function(window, document, undefined) {
           _cfAction.CALL_FORWARD_ACTION_REGISTRATION :
           _cfAction.CALL_FORWARD_ACTION_DISABLE;
         mozMobileCFInfo['reason'] = _cfReasonMapping[key];
-        mozMobileCFInfo['serviceClass'] =
-          mobileConnection.ICC_SERVICE_CLASS_VOICE;
+        mozMobileCFInfo['serviceClass'] = _voiceServiceClassMask;
 
-        if (!isPhoneNumberValid(textInput.value)) {
+        if (!cs_isPhoneNumberValid(textInput.value)) {
           document.getElementById('cf-confirm-message').textContent =
             _('callForwardingInvalidNumberError');
           var cfAlertPanel = document.querySelector('#call .cf-alert');
           cfAlertPanel.hidden = false;
-          updateCallForwardingSubpanels();
+          cs_enableTabOnCallerIdItem(false);
+          cs_enableTabOnCallWaitingItem(false);
+          cs_enableTapOnCallForwardingItems(false);
+          cs_updateCallForwardingSubpanels();
           return;
         }
         mozMobileCFInfo['number'] = textInput.value;
-        mozMobileCFInfo['timeSecond'] =
+        mozMobileCFInfo['timeSeconds'] =
           mozMobileCFInfo['reason'] !=
             _cfReason.CALL_FORWARD_REASON_NO_REPLY ? 0 : 20;
 
-        var req = mobileConnection.setCallForwardingOption(mozMobileCFInfo);
+        var req = _mobileConnection.setCallForwardingOption(mozMobileCFInfo);
+
+        cs_enableTabOnCallerIdItem(false);
+        cs_enableTabOnCallWaitingItem(false);
+        cs_enableTapOnCallForwardingItems(false);
+        cs_displayInfoForAll(_('callSettingsQuery'));
+
         req.onsuccess = function() {
-          updateCallForwardingSubpanels();
+          cs_updateCallForwardingSubpanels(null,
+                                           true,
+                                           key,
+                                           mozMobileCFInfo['action']);
         };
         req.onerror = function() {
-          updateCallForwardingSubpanels();
+          document.getElementById('cf-confirm-message').textContent =
+            _('callForwardingSetError');
+          var cfAlertPanel = document.querySelector('#call .cf-alert');
+          cfAlertPanel.hidden = false;
+          cs_updateCallForwardingSubpanels();
         };
       });
     });
   }
 
-  // Call subpanel navigation control.
-  var oldHash = document.location.hash || '#root';
-  function initCallForwarding() {
-    if (!settings || !mobileConnection) {
-      displayInfoForAll(_('callForwardingQueryError'));
-      return;
-    }
-
-    if (mobileConnection.cardState === 'absent') {
-      displayInfoForAll('');
-      return;
-    }
-
-    // Prevent sub panels from being selected while airplane mode.
-    mobileConnection.addEventListener('cardstatechange', function() {
-      enableTapOnCallForwardingItems(mobileConnection.cardState === 'ready');
-    });
-
-    // Init call forwarding option.
-    displaySimCardStateInfo();
-    getCallForwardingOption(function call_gotCFOption(cfOptions) {
-      if (cfOptions) {
-        displayRule(cfOptions['unconditional'], 'cfu-desc', 'unconditional');
-        displayRule(cfOptions['mobilebusy'], 'cfmb-desc', 'mobilebusy');
-        displayRule(cfOptions['noreply'], 'cfnrep-desc', 'noreply');
-        displayRule(cfOptions['notreachable'], 'cfnrea-desc', 'notreachable');
-        enableTapOnCallForwardingItems(true);
-      } else {
-        displayInfoForAll(_('callForwardingQueryError'));
-        enableTapOnCallForwardingItems(false);
+  /**
+   * Get the message to show after setting up call forwarding.
+   */
+  function cs_getSetCallForwardingOptionResult(rules, action) {
+    for (var i = 0; i < rules.length; i++) {
+      if (rules[i].active &&
+          ((_voiceServiceClassMask & rules[i].serviceClass) != 0)) {
+        var disableAction = action == _cfAction.CALL_FORWARD_ACTION_DISABLE;
+        var message = disableAction ?
+          _('callForwardingSetForbidden') : _('callForwardingSetSuccess');
+        return message;
       }
-      setTimeout(initCallForwardingObservers, 500);
-    });
+    }
+    var registrationAction =
+      action == _cfAction.CALL_FORWARD_ACTION_REGISTRATION;
+    var message = registrationAction ?
+      _('callForwardingSetError') : _('callForwardingSetSuccess');
+    return message;
+  }
 
+  /**
+   * Update call forwarding related subpanels.
+   */
+  function cs_updateCallForwardingSubpanels(callback,
+                                            checkSetCallForwardingOptionResult,
+                                            reason,
+                                            action) {
+    _updatingInProgress = true;
+
+    cs_displayInfoForAll(_('callSettingsQuery'));
+    cs_enableTapOnCallForwardingItems(false);
+    cs_getCallForwardingOption(function got_cfOption(cfOptions) {
+      if (cfOptions) {
+        // Need to check wether we enabled/disabled forwarding calls properly
+        // e.g. the carrier might not support disabling call forwarding for some
+        // reasons such as phone is busy, unreachable, etc.
+        if (checkSetCallForwardingOptionResult) {
+          var rules = cfOptions[reason];
+          var message = cs_getSetCallForwardingOptionResult(rules, action);
+          document.getElementById('cf-confirm-message').textContent = message;
+          var cfAlertPanel = document.querySelector('#call .cf-alert');
+          cfAlertPanel.hidden = false;
+        }
+        cs_displayRule(cfOptions['unconditional'], 'cfu-desc', 'unconditional');
+        cs_displayRule(cfOptions['mobilebusy'], 'cfmb-desc', 'mobilebusy');
+        cs_displayRule(cfOptions['noreply'], 'cfnrep-desc', 'noreply');
+        cs_displayRule(
+          cfOptions['notreachable'], 'cfnrea-desc', 'notreachable'
+        );
+        _getCallForwardingOptionSuccess = true;
+        cs_enableTabOnCallerIdItem(true);
+        cs_enableTabOnCallWaitingItem(true);
+        //  If the query is a success enable call forwarding items.
+        cs_enableTapOnCallForwardingItems(_getCallForwardingOptionSuccess);
+      } else {
+        cs_displayInfoForAll(_('callSettingsQueryError'));
+        _getCallForwardingOptionSuccess = false;
+        cs_enableTabOnCallerIdItem(true);
+        cs_enableTabOnCallWaitingItem(true);
+        //  If the query is an error disable call forwarding items.
+        cs_enableTapOnCallForwardingItems(_getCallForwardingOptionSuccess);
+      }
+      _updatingInProgress = false;
+      if (callback) {
+        callback(null);
+      }
+    });
+  }
+
+  /**
+   *
+   */
+  function cs_initCallForwarding() {
     // Initialize the call forwarding alert panel.
     var cfAlertPanel = document.querySelector('#call .cf-alert');
     var cfContinueBtn = cfAlertPanel.querySelector('.cf-alert-continue');
     cfContinueBtn.addEventListener('click', function() {
       cfAlertPanel.hidden = true;
     });
+  }
 
-    window.addEventListener('hashchange', function() {
-      // If navigation is from #root to #call panels then update UI always.
-      if (document.location.hash === '#call' &&
-          !oldHash.startsWith('#call-cf-')) {
-        if (!updatingInProgress) {
-          updateCallForwardingSubpanels();
+  /**
+   *
+   */
+  function cs_enableTabOnCallerIdItem(enable) {
+    var element = document.getElementById('menuItem-callerId');
+    if (enable) {
+      element.removeAttribute('aria-disabled');
+    } else {
+      element.setAttribute('aria-disabled', true);
+    }
+  }
+
+  /**
+   *
+   */
+  function cs_updateCallerIdItemState(callback) {
+    cs_enableTabOnCallerIdItem(false);
+    cs_enableTabOnCallWaitingItem(false);
+    cs_enableTapOnCallForwardingItems(false);
+
+    var req = _mobileConnection.getCallingLineIdRestriction();
+    req.onsuccess = req.onerror = function(event) {
+      var input = document.getElementById('ril-callerId');
+
+      var value = 'CLIR_DEFAULT';
+
+      // In some legitimates error cases (FdnCheckFailure), the req.result is
+      // undefined. This is fine, we want this, and in this case we will just
+      // display an error message for all the matching requests.
+      if (req.result) {
+        switch (req.result['m']) {
+          case 1: // Permanently provisioned
+          case 3: // Temporary presentation disallowed
+          case 4: // Temporary presentation allowed
+            switch (req.result['n']) {
+              case 1: // CLIR invoked
+                value = 'CLIR_INVOCATION';
+                break;
+              case 2: // CLIR suppressed
+                value = 'CLIR_SUPPRESSION';
+                break;
+              case 0: // Network default
+              default:
+                value = 'CLIR_DEFAULT';
+                break;
+            }
+            break;
+          case 0: // Not Provisioned
+          case 2: // Unknown (network error, etc)
+          default:
+            value = 'CLIR_DEFAULT';
+            break;
         }
       }
-      oldHash = document.location.hash;
+
+      input.value = value;
+
+      if (callback) {
+        callback(null);
+      }
+    };
+  }
+
+  /**
+   *
+   */
+  function cs_initCallerId() {
+    var element = document.getElementById('ril-callerId');
+    // We listen for blur events so that way we set the CLIR mode once the user
+    // clicks on the OK button.
+    element.addEventListener('blur', function(event) {
+      var clirMode = _clirConstantsMapping[element.value];
+      var req = _mobileConnection.setCallingLineIdRestriction(clirMode);
+      req.onsuccess = req.onerror = function() {
+        cs_updateCallerIdItemState(function() {
+          cs_enableTabOnCallerIdItem(true);
+          cs_enableTabOnCallWaitingItem(true);
+          cs_enableTapOnCallForwardingItems(true);
+        });
+      };
     });
   }
 
-  var callWaitingItemListener = function(evt) {
+  /**
+   *
+   */
+  function cs_callWaitingItemListener() {
     var alertPanel = document.querySelector('#call .cw-alert');
     var confirmInput =
       alertPanel.querySelector('.cw-alert-checkbox-label input');
 
     confirmInput.checked = false;
     alertPanel.hidden = false;
-  };
+  }
 
-  function enableTabOnCallWaitingItem(enable) {
+  /**
+   *
+   */
+  function cs_enableTabOnCallWaitingItem(enable) {
     var input =
       document.querySelector('#menuItem-callWaiting .checkbox-label input');
     var menuItem = document.getElementById('menuItem-callWaiting');
@@ -422,62 +628,76 @@ var Calls = (function(window, document, undefined) {
 
     input.disabled = !enable;
     if (enable) {
-      menuItem.classList.remove('disabled');
-      alertLabel.addEventListener('click', callWaitingItemListener);
+      menuItem.removeAttribute('aria-disabled');
+      alertLabel.addEventListener('click', cs_callWaitingItemListener);
     } else {
-      menuItem.classList.add('disabled');
-      alertLabel.removeEventListener('click', callWaitingItemListener);
+      menuItem.setAttribute('aria-disabled', true);
+      alertLabel.removeEventListener('click', cs_callWaitingItemListener);
     }
   }
 
-  function updateCallWaitingItemState(callWaitingEnabled) {
+  /**
+   *
+   */
+  function cs_updateCallWaitingItemState(callback) {
     var menuItem = document.querySelector('#menuItem-callWaiting');
     var input = menuItem.querySelector('.checkbox-label input');
 
-    if (callWaitingEnabled === null)
-      menuItem.dataset.state = 'unknown';
-    else {
-      input.checked = callWaitingEnabled;
-      if (callWaitingEnabled)
+    var getCWEnabled = _mobileConnection.getCallWaitingOption();
+    getCWEnabled.onsuccess = function cs_getCWEnabledSuccess() {
+      var enabled = getCWEnabled.result;
+      input.checked = enabled;
+      if (enabled) {
         menuItem.dataset.state = 'on';
-      else
+      } else {
         menuItem.dataset.state = 'off';
-    }
+      }
+      if (callback) {
+        callback(null);
+      }
+    };
+    getCWEnabled.onerror = function cs_getCWEnabledError() {
+      menuItem.dataset.state = 'unknown';
+      if (callback) {
+        callback(null);
+      }
+    };
   }
 
-  function initCallWaiting() {
-    if (!settings || !mobileConnection) {
-      enableTabOnCallWaitingItem(false);
-      return;
-    }
-
-    if (mobileConnection.cardState === 'absent') {
-      enableTabOnCallWaitingItem(false);
-      return;
-    }
-
-    // Prevent the item from being changed while airplane mode.
-    mobileConnection.addEventListener('cardstatechange', function() {
-      enableTabOnCallWaitingItem(mobileConnection.cardState === 'ready');
-    });
-
-
-    var alertPanel = document.querySelector('#call .cw-alert');
+  /**
+   *
+   */
+  function cs_initCallWaiting() {
+    var alertPanel =
+      document.querySelector('#call .cw-alert');
     var alertLabel =
       document.querySelector('#menuItem-callWaiting .alert-label');
     var setBtn = alertPanel.querySelector('.cw-alert-set');
     var cancelBtn = alertPanel.querySelector('.cw-alert-cancel');
 
-    alertLabel.addEventListener('click', callWaitingItemListener);
+    alertLabel.addEventListener('click', cs_callWaitingItemListener);
 
     setBtn.addEventListener('click', function cs_alertSetClicked(event) {
+      var handleSetCallWaiting = function cs_handleSetCallWaiting() {
+        cs_updateCallWaitingItemState(function() {
+          cs_enableTabOnCallerIdItem(true);
+          cs_enableTabOnCallWaitingItem(true);
+          // Keep the state of call forwarding items.
+          cs_enableTapOnCallForwardingItems(_getCallForwardingOptionSuccess);
+        });
+        alertPanel.hidden = true;
+      };
+      cs_enableTabOnCallerIdItem(false);
+      cs_enableTabOnCallWaitingItem(false);
+      cs_enableTapOnCallForwardingItems(false);
       var confirmInput =
         alertPanel.querySelector('.cw-alert-checkbox-label input');
-      setToSettingsDB('ril.callwaiting.enabled', confirmInput.checked);
-      alertPanel.hidden = true;
+      var req = _mobileConnection.setCallWaitingOption(confirmInput.checked);
+      req.onsuccess = req.onerror = handleSetCallWaiting;
     });
 
-    cancelBtn.addEventListener('click', function cs_alertCancelClicked(event) {
+    cancelBtn.addEventListener('click',
+      function cs_alertCancelClicked(event) {
       alertPanel.hidden = true;
     });
 
@@ -485,31 +705,187 @@ var Calls = (function(window, document, undefined) {
     var input =
       document.querySelector('#menuItem-callWaiting .checkbox-label input');
     input.addEventListener('change', function cs_cwInputChanged(event) {
-      setToSettingsDB('ril.callwaiting.enabled', input.checked);
+      var handleSetCallWaiting = function cs_handleSetCallWaiting() {
+        cs_updateCallWaitingItemState(function() {
+          cs_enableTabOnCallerIdItem(true);
+          cs_enableTabOnCallWaitingItem(true);
+          // Keep the state of call forwarding items.
+          cs_enableTapOnCallForwardingItems(_getCallForwardingOptionSuccess);
+        });
+      };
+      cs_enableTabOnCallerIdItem(false);
+      cs_enableTabOnCallWaitingItem(false);
+      cs_enableTapOnCallForwardingItems(false);
+      var req = _mobileConnection.setCallWaitingOption(input.checked);
+      req.onsuccess = req.onerror = handleSetCallWaiting;
     });
-
-    settings.addObserver('ril.callwaiting.enabled',
-      function call_callWaitingChanged(event) {
-        updateCallWaitingItemState(event.settingValue);
-    });
-
-    var getCWEnabled = settings.createLock().get('ril.callwaiting.enabled');
-    getCWEnabled.onsuccess = function cs_getCWEnabledSuccess() {
-      updateCallWaitingItemState(
-        getCWEnabled.result['ril.callwaiting.enabled']);
-    };
-
   }
 
-  // Public API.
-  return {
-    // Startup.
-    init: function calls_init() {
-      initCallForwarding();
-      initCallWaiting();
+  /**
+   *
+   */
+  function cs_updateVoiceMailItemState() {
+    var element = document.getElementById('voiceMail-desc');
+    if (!element) {
+      return;
     }
+
+    // XXX: Take care of voicemail settings for multi ICC card devices. See bug
+    // 960387 please.
+    var transaction = _settings.createLock();
+    var request = transaction.get('ril.iccInfo.mbdn');
+    request.onsuccess = function() {
+       var number = request.result['ril.iccInfo.mbdn'];
+
+       if (number) {
+         element.textContent = number;
+         return;
+       }
+       var voicemail = navigator.mozVoicemail;
+       if (voicemail) {
+         number = voicemail.number ||
+           voicemail.getNumber && voicemail.getNumber();
+
+         if (number) {
+           element.textContent = number;
+           cs_setToSettingsDB('ril.iccInfo.mbdn', number, null);
+         } else {
+           element.textContent = _('voiceMail-number-notSet');
+         }
+         return;
+       }
+       element.textContent = _('voiceMail-number-notSet');
+    };
+    request.onerror = function() {};
+  }
+
+  /**
+   *
+   */
+  function cs_initVoiceMailSettings() {
+    _settings.addObserver('ril.iccInfo.mbdn', function(event) {
+      cs_updateVoiceMailItemState();
+    });
+    var transaction = _settings.createLock();
+    var request = transaction.get('ril.iccInfo.mbdn');
+    request.onsuccess = function() {
+      var number = request.result['ril.iccInfo.mbdn'];
+      var voicemail = navigator.mozVoicemail;
+      // If the voicemail number has not been stored into the database yet we
+      // check whether the number is provided by the mozVoicemail API. In
+      // that case we store it into the setting database.
+      if (!number && voicemail) {
+         // TODO: remove this backward compatibility check
+         // after bug-814634 is landed
+        var voicemailNumber = voicemail.number ||
+          voicemail.getNumber && voicemail.getNumber();
+
+        if (voicemailNumber) {
+          cs_setToSettingsDB('ril.iccInfo.mbdn', voicemailNumber, null);
+        }
+        return;
+      }
+      cs_updateVoiceMailItemState();
+    };
+    request.onerror = function() {};
+  }
+
+  /**
+   * Init voice privacy mode.
+   */
+  function cs_initVoicePrivacyMode() {
+    // get network type
+    getSupportedNetworkInfo(_mobileConnection, function(result) {
+      if (!result.cdma) {
+        return;
+      }
+
+      var defaultVoicePrivacySettings =
+        Array.prototype.map.call(_mobileConnections,
+          function() { return false; });
+      var voicePrivacyHelper =
+        SettingsHelper('ril.voicePrivacy.enabled', defaultVoicePrivacySettings);
+
+      var privacyModeItem =
+        document.getElementById('menuItem-voicePrivacyMode');
+      var privacyModeInput =
+        privacyModeItem.querySelector('input');
+
+      var getReq = _mobileConnection.getVoicePrivacyMode();
+      getReq.onsuccess = function get_vpm_success() {
+        privacyModeItem.hidden = false;
+        privacyModeInput.checked = getReq.result;
+      };
+      getReq.onerror = function get_vpm_error() {
+        console.warn('get voice privacy mode: ' + getReq.error.name);
+        if (getReq.error.name === 'RequestNotSupported' ||
+            getReq.error.name === 'GenericFailure') {
+          privacyModeItem.hidden = true;
+        }
+      };
+
+      privacyModeInput.addEventListener('change',
+        function vpm_inputChanged() {
+          var checked = this.checked;
+          voicePrivacyHelper.get(function gotVP(values) {
+            var originalValue = !checked;
+            var setReq = _mobileConnection.setVoicePrivacyMode(checked);
+            setReq.onsuccess = function set_vpm_success() {
+              var targetIndex = DsdsSettings.getIccCardIndexForCallSettings();
+              values[targetIndex] = !originalValue;
+              voicePrivacyHelper.set(values);
+            };
+            setReq.onerror = function get_vpm_error() {
+              // restore the value if failed.
+              privacyModeInput.checked = originalValue;
+            };
+          });
+      });
+    });
+  }
+
+  /**
+   *
+   */
+  function cs_updateFdnStatus() {
+    // TODO: Add support for FDN feauture on multi ICC card devices.
+    if (!IccHelper) {
+      return;
+    }
+
+    var req = IccHelper.getCardLock('fdn');
+    req.onsuccess = function spl_checkSuccess() {
+      var enabled = req.result.enabled;
+
+      var simFdnDesc = document.querySelector('#fdnSettings-desc');
+      localize(simFdnDesc, enabled ? 'enabled' : 'disabled');
+
+      var fdnSettingsBlocked = document.querySelector('#fdnSettingsBlocked');
+      fdnSettingsBlocked.hidden = !enabled;
+
+      var callForwardingOptions = document.querySelectorAll(
+        '#li-cfu-desc, #li-cfmb-desc, #li-cfnrep-desc, #li-cfnrea-desc');
+      for (var i = 0, l = callForwardingOptions.length; i < l; i++) {
+        callForwardingOptions[i].hidden = enabled;
+      }
+    };
+  }
+
+  return {
+    init: cs_init
   };
 })(this, document);
 
-// Startup.
-navigator.mozL10n.ready(Calls.init.bind(Calls));
+/**
+ * Startup.
+ */
+navigator.mozL10n.ready(function loadWhenIdle() {
+  var idleObserver = {
+    time: 3,
+    onidle: function() {
+      CallSettings.init();
+      navigator.removeIdleObserver(idleObserver);
+    }
+  };
+  navigator.addIdleObserver(idleObserver);
+});

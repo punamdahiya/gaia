@@ -8,7 +8,6 @@
  *    ['/path/to/file.js', '/path/to/file.css', 'domNode'], callback
  *   );
  */
-
 var LazyLoader = (function() {
 
   function LazyLoader() {
@@ -21,6 +20,10 @@ var LazyLoader = (function() {
     _js: function(file, callback) {
       var script = document.createElement('script');
       script.src = file;
+      // until bug 916255 lands async is the default so
+      // we must disable it so scripts load in the order they where
+      // required.
+      script.async = false;
       script.addEventListener('load', callback);
       document.head.appendChild(script);
       this._isLoading[file] = script;
@@ -36,6 +39,15 @@ var LazyLoader = (function() {
     },
 
     _html: function(domNode, callback) {
+
+      // The next few lines are for loading html imports in DEBUG mode
+      if (domNode.getAttribute('is')) {
+        this.load(['/shared/js/html_imports.js'], function() {
+          HtmlImports.populate(callback);
+        }.bind(this));
+        return;
+      }
+
       for (var i = 0; i < domNode.childNodes.length; i++) {
         if (domNode.childNodes[i].nodeType == document.COMMENT_NODE) {
           domNode.innerHTML = domNode.childNodes[i].nodeValue;
@@ -72,7 +84,7 @@ var LazyLoader = (function() {
         } else {
           var method, idx;
           if (typeof file === 'string') {
-            method = file.match(/\.(.*?)$/)[1];
+            method = file.match(/\.([^.]+)$/)[1];
             idx = file;
           } else {
             method = 'html';

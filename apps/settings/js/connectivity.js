@@ -12,16 +12,22 @@
 
 // display connectivity status on the main panel
 var Connectivity = (function(window, document, undefined) {
+  var _bluetooth_address = '';
   var _initialized = false;
+  var _macAddress = '';
   var _ = navigator.mozL10n.get;
 
-  // in util.js, we fake these device interfaces if they are not exist.
-  var wifiManager = getWifiManager();
+  // in desktop helper we fake these device interfaces if they don't exist.
+  var wifiManager = WifiHelper.getWifiManager();
   var bluetooth = getBluetooth();
   var mobileConnection = getMobileConnection();
 
-  mobileConnection.addEventListener('datachange', updateCarrier);
-  mobileConnection.addEventListener('cardstatechange', updateCallSettings);
+  var initOrder = [
+    updateWifi,
+    updateBluetooth,
+    // register blutooth system message handler
+    initSystemMessageHandler
+  ];
 
   // XXX if wifiManager implements addEventListener function
   // we can remove these listener lists.
@@ -30,7 +36,6 @@ var Connectivity = (function(window, document, undefined) {
   var wifiStatusChangeListeners = [updateWifi];
   var settings = Settings.mozSettings;
 
-  //
   // Set wifi.enabled so that it mirrors the state of the hardware.
   // wifi.enabled is not an ordinary user setting because the system
   // turns it on and off when wifi goes up and down.
@@ -40,27 +45,40 @@ var Connectivity = (function(window, document, undefined) {
   //
   // Now register callbacks to track the state of the wifi hardware
   //
-  wifiManager.onenabled = function() {
-    dispatchEvent(new CustomEvent('wifi-enabled'));
-    wifiEnabled();
-  };
-  wifiManager.ondisabled = function() {
-    dispatchEvent(new CustomEvent('wifi-disabled'));
-    wifiDisabled();
-  };
-  wifiManager.onstatuschange = wifiStatusChange;
+  if (wifiManager) {
+    wifiManager.onenabled = function() {
+      dispatchEvent(new CustomEvent('wifi-enabled'));
+      wifiEnabled();
+    };
+    wifiManager.ondisabled = function() {
+      dispatchEvent(new CustomEvent('wifi-disabled'));
+      wifiDisabled();
+    };
+    wifiManager.onstatuschange = wifiStatusChange;
+  }
 
   // Register callbacks to track the state of the bluetooth hardware
-  bluetooth.addEventListener('adapteradded', function() {
-    dispatchEvent(new CustomEvent('bluetooth-adapter-added'));
-    updateBluetooth();
-  });
-  bluetooth.addEventListener('disabled', function() {
-    dispatchEvent(new CustomEvent('bluetooth-disabled'));
-    updateBluetooth();
-  });
+  if (bluetooth) {
+    bluetooth.addEventListener('adapteradded', function() {
+      dispatchEvent(new CustomEvent('bluetooth-adapter-added'));
+      updateBluetooth();
+    });
+    bluetooth.addEventListener('disabled', function() {
+      dispatchEvent(new CustomEvent('bluetooth-disabled'));
+      updateBluetooth();
+    });
+  }
 
   window.addEventListener('bluetooth-pairedstatuschanged', updateBluetooth);
+
+  function lazyInit(index) {
+    if (index >= initOrder.length) {
+      return;
+    }
+
+    initOrder[index]();
+    setTimeout(lazyInit.bind(this, index + 1));
+  }
 
   // called when localization is done
   function init() {
@@ -69,28 +87,7 @@ var Connectivity = (function(window, document, undefined) {
     }
     _initialized = true;
 
-    kCardState = {
-      'pinRequired' : _('simCardLockedMsg'),
-      'pukRequired' : _('simCardLockedMsg'),
-      'networkLocked' : _('simLockedPhone'),
-      'serviceProviderLocked' : _('simLockedPhone'),
-      'corporateLocked' : _('simLockedPhone'),
-      'unknown' : _('unknownSimCardState'),
-      'absent' : _('noSimCard'),
-      'null' : _('simCardNotReady')
-    };
-
-    updateCarrier();
-    updateCallSettings();
-    updateWifi();
-    updateBluetooth();
-    // register blutooth system message handler
-    initSystemMessageHandler();
-
-    window.addEventListener('localized', function() {
-      updateWifi();
-      updateBluetooth();
-    });
+    lazyInit(0);
   }
 
   /**
@@ -100,35 +97,60 @@ var Connectivity = (function(window, document, undefined) {
   var wifiDesc = document.getElementById('wifi-desc');
 
   function updateWifi() {
+    if (!wifiManager) {
+      return;
+    }
     if (!_initialized) {
       init();
       return; // init will call updateWifi()
     }
 
-    if (wifiManager.enabled) {
-      // network.connection.status has one of the following values:
-      // connecting, associated, connected, connectingfailed, disconnected.
-      wifiDesc.textContent = _('fullStatus-' +
-        wifiManager.connection.status,
-        wifiManager.connection.network);
-    } else {
-      wifiDesc.textContent = _('disabled');
-      wifiDesc.dataset.l10nId = 'disabled';
+    // If the MAC address is in the Settings database, it's already displayed in
+    // all `MAC address' fields; if not, it will be set as soon as the Wi-Fi is
+    // enabled (see `storeMacAddress').
+    if (!_macAddress && settings) {
+      var req = settings.createLock().get('deviceinfo.mac');
+      req.onsuccess = function macAddr_onsuccess() {
+        _macAddress = req.result['deviceinfo.mac'];
+      };
     }
 
-    // record the MAC address here because the "Device Information" panel
-    // has to display it as well
-    if (settings) {
-      settings.createLock().set({ 'deviceinfo.mac': wifiManager.macAddress });
+    if (wifiManager.enabled) {
+      storeMacAddress();
+      // network.connection.status has one of the following values:
+      // connecting, associated, connected, connectingfailed, disconnected.
+      localize(wifiDesc, 'fullStatus-' + wifiManager.connection.status,
+               wifiManager.connection.network);
+    } else {
+      localize(wifiDesc, 'disabled');
+    }
+  }
+
+  function storeMacAddress() {
+    if (!wifiManager) {
+      return;
+    }
+    // Store the MAC address in the Settings database.  Note: the wifiManager
+    // sets macAddress to the string `undefined' when it is not available.
+    if (settings && wifiManager.macAddress &&
+                    wifiManager.macAddress !== _macAddress &&
+                    wifiManager.macAddress !== 'undefined') {
+      _macAddress = wifiManager.macAddress;
+      settings.createLock().set({ 'deviceinfo.mac': _macAddress });
+      // update all related fields in the UI
+      var fields = document.querySelectorAll('[data-name="deviceinfo.mac"]');
+      for (var i = 0, l = fields.length; i < l; i++) {
+        fields[i].textContent = _macAddress;
+      }
     }
   }
 
   function wifiEnabled() {
-    // Keep the setting in sync with the hardware state.
-    // We need to do this because b2g/dom/wifi/WifiWorker.js can turn
-    // the hardware on and off
+    // Keep the setting in sync with the hardware state.  We need to do this
+    // because b2g/dom/wifi/WifiWorker.js can turn the hardware on and off.
     settings.createLock().set({'wifi.enabled': true});
     wifiEnabledListeners.forEach(function(listener) { listener(); });
+    storeMacAddress();
   }
 
   function wifiDisabled() {
@@ -142,130 +164,56 @@ var Connectivity = (function(window, document, undefined) {
   }
 
   /**
-   * Mobile Connection Manager
-   */
-
-  var kCardState; // see init()
-  var kDataType = {
-    'lte' : '4G LTE',
-    'ehrpd': 'CDMA',
-    'hspa+': '3.5G HSPA+',
-    'hsdpa': '3.5G HSDPA',
-    'hsupa': '3.5G HSDPA',
-    'hspa' : '3.5G HSDPA',
-    'evdo0': '3G CDMA',
-    'evdoa': '3G CDMA',
-    'evdob': '3G CDMA',
-    '1xrtt': '3G CDMA',
-    'umts' : '3G UMTS',
-    'edge' : '2G EDGE',
-    'is95a': '2G CDMA',
-    'is95b': '2G CDMA',
-    'gprs' : '2G GPRS'
-  };
-
-  var dataDesc = document.getElementById('data-desc');
-
-  function updateCarrier() {
-    // if 'datachange' event happens before init
-    if (!_initialized) {
-      init();
-      return; // init will call updateCarrier()
-    }
-
-    var setCarrierStatus = function(msg) {
-      var operator = msg.operator || '';
-      var data = msg.data || '';
-      var text = msg.error ||
-        ((data && operator) ? (operator + ' - ' + data) : operator);
-      dataDesc.textContent = text;
-
-      /**
-       * XXX italic style for specifying state change is not a ideal solution
-       * for non-Latin alphabet scripts in terms of typography, e.g. Chinese,
-       * Japanese, etc.
-       * We might have to switch to labels with parenthesis for these languages.
-       */
-      dataDesc.style.fontStyle = msg.error ? 'italic' : 'normal';
-
-      // in case the "Carrier & Data" panel is displayed...
-      var dataNetwork = document.getElementById('dataNetwork-desc');
-      var dataConnection = document.getElementById('dataConnection-desc');
-      if (dataNetwork && dataConnection) {
-        dataNetwork.textContent = operator;
-        dataConnection.textContent = data;
-      }
-    };
-
-    if (!mobileConnection)
-      return setCarrierStatus({});
-
-    // ensure the SIM card is present and unlocked
-    var cardState = kCardState[mobileConnection.cardState ?
-                               mobileConnection.cardState :
-                               'null'];
-    if (cardState)
-      return setCarrierStatus({ error: cardState });
-
-    // operator name & data connection type
-    if (!mobileConnection.data || !mobileConnection.data.network)
-      return setCarrierStatus({ error: '???'}); // XXX should never happen
-    var operatorInfos = MobileOperator.userFacingInfo(mobileConnection);
-    var operator = operatorInfos.operator;
-    if (operatorInfos.region) {
-      operator += ' ' + operatorInfos.region;
-    }
-    var data = mobileConnection.data;
-    var dataType = (data.connected && data.type) ? kDataType[data.type] : '';
-    setCarrierStatus({
-      operator: operator,
-      data: dataType
-    });
-  }
-
-  /**
-   * Call Settings
-   */
-
-  var callDesc = document.getElementById('call-desc');
-  callDesc.style.fontStyle = 'italic';
-
-  function updateCallSettings() {
-    if (!_initialized) {
-      init();
-      return; // init will call updateCallSettings()
-    }
-
-    var mobileConnection = getMobileConnection();
-
-    if (!mobileConnection)
-      return;
-
-    // update the current SIM card state
-    var cardState = mobileConnection.cardState;
-    callDesc.textContent = kCardState[cardState] || '';
-  }
-
-  /**
    * Bluetooth Manager
    */
 
-
   function updateBluetooth() {
+    if (!bluetooth) {
+      return;
+    }
     var bluetoothDesc = document.getElementById('bluetooth-desc');
     // if 'adapteradd' or 'disabled' event happens before init
     if (!_initialized) {
       init();
       return; // init will call updateBluetooth()
     }
-    bluetoothDesc.textContent = bluetooth.enabled ?
-      _('bt-status-nopaired') : _('bt-status-turnoff');
+
+    var l10nId = bluetooth.enabled ? 'bt-status-nopaired' : 'bt-status-turnoff';
+    localize(bluetoothDesc, l10nId);
+
     if (!bluetooth.enabled) {
       return;
     }
+
+    // If the BT address is in the Settings database, it's already displayed in
+    // all `Bluetooth address' fields; if not, it will be set as soon as BT is
+    // enabled.
+    if (!_bluetooth_address && settings) {
+      var req = settings.createLock().get('deviceinfo.bt_address');
+      req.onsuccess = function btAddr_onsuccess() {
+        _bluetooth_address = req.result['deviceinfo.bt_address'];
+      };
+    }
+
     var req = bluetooth.getDefaultAdapter();
     req.onsuccess = function bt_getAdapterSuccess() {
       var defaultAdapter = req.result;
+
+      // Set Bluetooth address after getting the adapter if it wasn't already
+      // done so earlier.
+      if (!_bluetooth_address && defaultAdapter.address) {
+        _bluetooth_address = defaultAdapter.address;
+
+        settings.createLock().set({ 'deviceinfo.bt_address':
+                                   _bluetooth_address });
+        // update UI fields
+        var fields =
+          document.querySelectorAll('[data-name="deviceinfo.bt_address"]');
+        for (var i = 0, l = fields.length; i < l; i++) {
+          fields[i].textContent = _bluetooth_address;
+        }
+      }
+
       var reqPaired = defaultAdapter.getPairedDevices();
       reqPaired.onsuccess = function bt_getPairedSuccess() {
         // copy for sorting
@@ -277,40 +225,28 @@ var Connectivity = (function(window, document, undefined) {
         paired.sort(function(a, b) {
           return a.name > b.name;
         });
-        var text = _('bt-status-paired', {
-          name: paired[0].name,
-          n: length - 1
-        });
-        bluetoothDesc.textContent = text;
+
+        localize(bluetoothDesc, 'bt-status-paired',
+                 { name: paired[0].name, n: length - 1 });
       };
     };
   }
 
   function initSystemMessageHandler() {
     // XXX this is not a good way to interact with bluetooth.js
-    var handlePairingRequest = function(message, method) {
-      window.location.hash = '#bluetooth';
+    var handlePairingRequest = function(message) {
+      Settings.currentPanel = '#bluetooth';
       setTimeout(function() {
-        gDeviceList.onRequestPairing(message, method);
+        dispatchEvent(new CustomEvent('bluetooth-pairing-request', {
+          detail: message
+        }));
       }, 1500);
     };
 
     // Bind message handler for incoming pairing requests
-    navigator.mozSetMessageHandler('bluetooth-requestconfirmation',
-      function bt_gotConfirmationMessage(message) {
-        handlePairingRequest(message, 'confirmation');
-      }
-    );
-
-    navigator.mozSetMessageHandler('bluetooth-requestpincode',
-      function bt_gotPincodeMessage(message) {
-        handlePairingRequest(message, 'pincode');
-      }
-    );
-
-    navigator.mozSetMessageHandler('bluetooth-requestpasskey',
-      function bt_gotPasskeyMessage(message) {
-        handlePairingRequest(message, 'passkey');
+    navigator.mozSetMessageHandler('bluetooth-pairing-request',
+      function bt_gotPairingRequestMessage(message) {
+        handlePairingRequest(message);
       }
     );
   }
@@ -322,7 +258,6 @@ var Connectivity = (function(window, document, undefined) {
   return {
     init: init,
     updateWifi: updateWifi,
-    updateCarrier: updateCarrier,
     updateBluetooth: updateBluetooth,
     set wifiEnabled(listener) { wifiEnabledListeners.push(listener) },
     set wifiDisabled(listener) { wifiDisabledListeners.push(listener); },

@@ -137,9 +137,8 @@ Calendar.IntervalTree = (function() {
      * @param {Function} callback first argument is matching
      *                            record second is the node in the
      *                            tree where record was found.
-     * @param {boolean|undefined} inclusive whether to check endpoints.
      */
-    traverse: function(span, fn, inclusive) {
+    traverse: function(span, fn) {
       if (this.left && (span.start < this.median)) {
         this.left.traverse(span, fn);
       }
@@ -155,7 +154,7 @@ Calendar.IntervalTree = (function() {
           break;
         }
 
-        if (span.overlaps(item[START], item[END], inclusive)) {
+        if (span.overlaps(item[START], item[END])) {
           fn(item, this);
         }
       }
@@ -169,10 +168,9 @@ Calendar.IntervalTree = (function() {
      * Find all overlapping records via a Calendar.Timespan.
      *
      * @param {Calendar.Timespan} span timespan.
-     * @param {boolean|undefined} inclusive whether to check endpoints.
      * @return {Array} results sorted by start time.
      */
-    query: function(span, inclusive) {
+    query: function(span) {
       var results = [];
       var seen = Object.create(null);
 
@@ -183,7 +181,7 @@ Calendar.IntervalTree = (function() {
         if (!seen[item._id]) {
           results.push(item);
         }
-      }, inclusive);
+      });
 
       return results;
     }
@@ -209,6 +207,15 @@ Calendar.IntervalTree = (function() {
       this.items = list.concat([]);
     }
 
+    /**
+     * Properties to index by when fields are added.
+     */
+    this._indexes = Object.create(null);
+
+    // method aggregates
+    this._indexOnAdd = [];
+    this._indexOnRemove = [];
+
     this.byId = Object.create(null);
     this.synced = false;
   };
@@ -227,6 +234,61 @@ Calendar.IntervalTree = (function() {
 
     _getId: function(item) {
       return item._id;
+    },
+
+    /**
+     * Returns all values in the given index.
+     *
+     * @param {String} property name of index.
+     * @param {String} [value] to filter index on (optional).
+     * @return {Null|Array}
+     */
+    index: function(property, value) {
+      var items = this._indexes[property];
+
+      if (items && value)
+        return items[value];
+
+      return items;
+    },
+
+    /**
+     * Create index on property.
+     *
+     * @param {String} property to index on.
+     */
+    createIndex: function(property) {
+      var index = this._indexes[property] = {};
+
+      // remember this will be invoked later with the context
+      // of |this| always...
+      function addToIndex(object) {
+        var value = object[property];
+
+        // create array for index possibilities
+        if (!index[value])
+          index[value] = [];
+
+        // and push single object to index
+        index[value].push(object);
+      }
+
+      function removeFromIndex(object) {
+        // object given should always be same instance stored.
+        var value = object[property];
+        var valueGroup = index[value];
+
+        if (valueGroup) {
+          var idx = valueGroup.indexOf(object);
+          valueGroup.splice(idx, 1);
+          if (valueGroup.length === 0) {
+            delete index[value];
+          }
+        }
+      }
+
+      this._indexOnAdd.push(addToIndex);
+      this._indexOnRemove.push(removeFromIndex);
     },
 
     /**
@@ -265,6 +327,11 @@ Calendar.IntervalTree = (function() {
       this.items.splice(idx, 0, item);
       this.byId[id] = item;
       this.synced = false;
+
+      var len = this._indexOnAdd.length;
+      for (var i = 0; i < len; i++) {
+        this._indexOnAdd[i].call(this, item);
+      }
 
       return item;
     },
@@ -347,6 +414,11 @@ Calendar.IntervalTree = (function() {
       if (Array.isArray(item)) {
         item.forEach(this._removeIds, this);
       } else {
+        var len = this._indexOnRemove.length;
+        for (var i = 0; i < len; i++) {
+          this._indexOnRemove[i].call(this, item);
+        }
+
         var id = this._getId(item);
         delete this.byId[id];
       }
@@ -462,11 +534,10 @@ Calendar.IntervalTree = (function() {
      * Rebuilds tree if in unclean state first.
      *
      * @param {Calendar.Timespan} span timespan.
-     * @param {boolean|undefined} inclusive whether to check endpoints.
      */
-    query: function(span, inclusive) {
+    query: function(span) {
       this.build();
-      return this.rootNode.query(span, inclusive);
+      return this.rootNode.query(span);
     },
 
     _nodeFromList: function(list) {

@@ -1,23 +1,33 @@
 !function() {
 
-  function MockBluetoothRequest() {
-
+  function debug(str) {
+    //dump('Bluetooth : ' + str + '\n');
   }
+
+  function MockBluetoothRequest() {
+  }
+
   MockBluetoothRequest.prototype = {
   };
 
   FFOS_RUNTIME.makeNavigatorShim('mozBluetooth', {
     enabled: true,
+    addEventListener: function(type, callback, bubble) {},
+    onenabled: function(event) {},
+    ondisabled: function(event) {},
     onadapteradded: function() {
-      console.log('bluetooth onadapteradded');
+      debug('onadapteradded');
     },
-    getDefaultAdapter: function() {
-      console.log('bluetooth getDefaultAdapter');
-      var bluetoothRequest = new MockBluetoothRequest();
-      return bluetoothRequest;
-    },
+    getDefaultAdapter: FFOS_RUNTIME.domRequest({
+      ondevicefound: function() {},
+      setDiscoverable: function() {},
+      getPairedDevices: FFOS_RUNTIME.domRequest([]),
+      startDiscovery: FFOS_RUNTIME.domRequest(),
+      name: 'I like blue',
+      setName: FFOS_RUNTIME.domRequest()
+    }),
     isConnected: function() {
-      console.log('bluetooth isConnected');
+      debug('isConnected');
     }
   });
 }();

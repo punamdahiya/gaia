@@ -10,7 +10,7 @@ if (!window.LiveConnector) {
       'personal': 'personal',
       'mobile': 'mobile',
       'business': 'work',
-      'other': 'another',
+      'other': 'other',
       'preferred': 'personal'
     };
 
@@ -109,10 +109,10 @@ if (!window.LiveConnector) {
         var bday = liveContact.birth_day;
         if (bmonth && bday) {
           var birthdate = out.bday = new Date();
-          birthdate.setDate(bday);
-          birthdate.setMonth(bmonth, bday);
+          birthdate.setUTCDate(bday);
+          birthdate.setUTCMonth(bmonth, bday);
           if (byear) {
-            birthdate.setYear(byear);
+            birthdate.setUTCFullYear(byear);
           }
         }
 
@@ -174,6 +174,10 @@ if (!window.LiveConnector) {
 
       get name() {
         return 'live';
+      },
+
+      get automaticLogout() {
+        return true;
       },
 
       downloadContactPicture: function(contact, access_token, callbacks) {

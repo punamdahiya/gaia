@@ -1,59 +1,17 @@
 /* -*- Mode: Java; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- /
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
+/* API Summary:
+   stopSendingFile(in DOMString aDeviceAddress);
+   confirmReceivingFile(in DOMString aDeviceAddress, in bool aConfirmation); */
 'use strict';
 
-// Following formats are supported by DeviceStorage
-// Ref: http://dxr.mozilla.org/mozilla-central/toolkit/content/
-// devicestorage.properties
-// # Extensions we recognize for DeviceStorage storage areas
-// pictures=*.jpe; *.jpg; *.jpeg; *.gif; *.png; *.bmp;
-// music=*.mp3; *.ogg; *.m4a; *.m4b; *.m4p; *.m4r; *.3gp; *.mp4; *.aac; *.m3u;
-//       *.pls; *.opus;
-// videos=*.mp4; *.mpeg; *.mpg; *.ogv; *.ogx; *.webm; *.3gp; *.ogg;
-
-var FileFormats = {       // Reference link:
-  // Image section
-  jpe: 'image/jpeg',      // http://en.wikipedia.org/wiki/JPEG
-  jpg: 'image/jpeg',      // http://en.wikipedia.org/wiki/JPEG
-  jpeg: 'image/jpeg',     // http://en.wikipedia.org/wiki/JPEG
-  gif: 'image/gif',       // http://en.wikipedia.org/wiki/Internet_media_type
-  png: 'image/png',       // http://en.wikipedia.org/wiki/Internet_media_type
-  bmp: 'image/bmp',       // http://en.wikipedia.org/wiki/BMP_file_format
-
-  // Music section
-  mp3: 'audio/mpeg',      // http://en.wikipedia.org/wiki/Internet_media_type
-  m4a: 'audio/x-m4a',     // http://www.mediawiki.org/wiki/
-  m4b: 'audio/x-m4b',     // Mobile_browser_testing/iPhone
-  m4p: 'audio/x-m4p',     // Same as above link
-  m4r: 'video/mp4',       // http://en.wikipedia.org/wiki/MPEG-4_Part_14
-
-  // XXX: https://bugzilla.mozilla.org/show_bug.cgi?id=850544
-  // We need to identify audio or video type by metadata parser for these format
-  // Before we support metadata parser, let these file format to be video type.
-  // ogg: 'audio/ogg',    // http://en.wikipedia.org/wiki/Ogg
-  // 3gp: 'audio/3gpp',   // http://en.wikipedia.org/wiki/Advanced_Audio_Coding
-  // mp4: 'audio/mp4',    // http://en.wikipedia.org/wiki/Internet_media_type
-  aac: 'audio/aac',       // http://en.wikipedia.org/wiki/Advanced_Audio_Coding
-  m3u: 'audio/x-mpegurl', // http://en.wikipedia.org/wiki/M3U
-  pls: 'audio/x-scpls',   // http://en.wikipedia.org/wiki/PLS_%28file_format%29
-  opus: 'audio/ogg',      // http://de.wikipedia.org/wiki/Opus_%28Audioformat%29
-
-  // Video section
-  mp4: 'video/mp4',       // http://en.wikipedia.org/wiki/MPEG-4_Part_14
-  mpeg: 'video/mpeg',     // http://wiki.whatwg.org/wiki/Video_type_parameters
-  mpg: 'video/mpeg',      // http://wiki.whatwg.org/wiki/Video_type_parameters
-  ogv: 'video/ogg',       // http://en.wikipedia.org/wiki/Ogg
-  ogx: 'video/ogg',       // http://en.wikipedia.org/wiki/Ogg
-  webm: 'video/webm',     // http://wiki.whatwg.org/wiki/Video_type_parameters
-  '3gp': 'video/3gpp',    // http://wiki.whatwg.org/wiki/Video_type_parameters
-  ogg: 'audio/ogg'        // http://en.wikipedia.org/wiki/Ogg (belong to audio)
-};
-
 var BluetoothTransfer = {
-  bannerContainer: null,
   pairList: {
     index: []
   },
+  // The first-in-first-out queue maintain each scheduled sending task.
+  // Each element is a object for scheduled sending tasks.
+  _sendingFilesQueue: [],
   _deviceStorage: navigator.getDeviceStorage('sdcard'),
   _debug: false,
 
@@ -63,12 +21,12 @@ var BluetoothTransfer = {
       document.getElementById('bluetooth-transfer-status-list');
   },
 
-  get banner() {
-    delete this.banner;
-    return this.banner = document.getElementById('system-banner');
-  },
-
   init: function bt_init() {
+    // Bind message handler for sending files from Bluetooth app
+    window.addEventListener('iac-bluetoothTransfercomms',
+      this.onFilesSending.bind(this)
+    );
+
     // Bind message handler for transferring file callback
     navigator.mozSetMessageHandler('bluetooth-opp-receiving-file-confirmation',
       this.onReceivingFileConfirmation.bind(this)
@@ -87,7 +45,6 @@ var BluetoothTransfer = {
     window.addEventListener('bluetooth-opp-transfer-complete',
       this.onTransferComplete.bind(this)
     );
-    this.bannerContainer = this.banner.firstElementChild;
   },
 
   getDeviceName: function bt_getDeviceName(address) {
@@ -152,7 +109,34 @@ var BluetoothTransfer = {
     });
   },
 
+  onFilesSending: function bt_onFilesSending(evt) {
+    var _ = navigator.mozL10n.get;
+
+    // Notify user that we are sending files
+    var icon = 'style/bluetooth_transfer/images/transfer.png';
+    NotificationHelper.send(_('transfer-has-started-title'),
+                            _('transfer-has-started-description'),
+                            icon,
+                            function() {
+                              UtilityTray.show();
+                            });
+
+    // Push sending files request in queue
+    var sendingFilesSchedule = evt.detail;
+    this._sendingFilesQueue.push(sendingFilesSchedule);
+    var msg = 'push sending files request in queue, queued length = ' +
+              this._sendingFilesQueue.length;
+    this.debug(msg);
+  },
+
   onReceivingFileConfirmation: function bt_onReceivingFileConfirmation(evt) {
+    if (NfcHandoverManager.isHandoverInProgress()) {
+      // Bypassing confirm dialog while incoming file transfer via NFC Handover
+      this.debug('Incoming file via NFC Handover. Bypassing confirm dialog');
+      this.acceptReceive(evt);
+      return;
+    }
+
     // Prompt appears when a transfer request from a paired device is received.
     var _ = navigator.mozL10n.get;
 
@@ -161,24 +145,16 @@ var BluetoothTransfer = {
     var self = this;
     var icon = 'style/bluetooth_transfer/images/icon_bluetooth.png';
 
-    // Check storage is available or not before the prompt.
-    this.checkStorageSpace(fileSize,
-      function checkStorageSpaceComplete(isStorageAvailable, errorMessage) {
-        if (isStorageAvailable) {
-          self.getPairedDevice(function getPairedDeviceComplete() {
-            var deviceName = self.getDeviceName(address);
-            NotificationHelper.send(_('notification-fileTransfer-title',
-                                    { deviceName: deviceName }),
-                                    _('notification-fileTransfer-description'),
-                                    icon,
-                                    function() {
-                                      UtilityTray.hide();
-                                      self.showReceivePrompt(evt);
-                                    });
-          });
-        } else {
-          self.showStorageUnavaliablePrompt(errorMessage);
-        }
+    this.getPairedDevice(function getPairedDeviceComplete() {
+      var deviceName = self.getDeviceName(address);
+      NotificationHelper.send(_('transfer-confirmation-title',
+                              { deviceName: deviceName }),
+                              _('transfer-confirmation-description'),
+                              icon,
+                              function() {
+                                UtilityTray.hide();
+                                self.showReceivePrompt(evt);
+                              });
     });
   },
 
@@ -195,20 +171,20 @@ var BluetoothTransfer = {
 
     var confirm = {
       title: _('transfer'),
-      callback: this.acceptReceive.bind(this, address)
+      callback: this.acceptReceive.bind(this, evt),
+      recommend: true
     };
 
     var deviceName = '';
-    var self = this;
     this.getPairedDevice(function getPairedDeviceComplete() {
-      deviceName = self.getDeviceName(address);
+      deviceName = this.getDeviceName(address);
       CustomDialog.show(_('acceptFileTransfer'),
                         _('wantToReceiveFile',
                         { deviceName: deviceName,
                           fileName: fileName,
                           fileSize: fileSize }),
                         cancel, confirm);
-    });
+    }.bind(this));
   },
 
   declineReceive: function bt_declineReceive(address) {
@@ -222,15 +198,27 @@ var BluetoothTransfer = {
     }
   },
 
-  acceptReceive: function bt_acceptReceive(address, fileSize) {
+  acceptReceive: function bt_acceptReceive(evt) {
     CustomDialog.hide();
-    var adapter = Bluetooth.getAdapter();
-    if (adapter != null) {
-      adapter.confirmReceivingFile(address, true);
-    } else {
-      var msg = 'Cannot get adapter from system Bluetooth monitor.';
-      this.debug(msg);
-    }
+    // Check storage is available or not before confirm receiving file
+    var address = evt.address;
+    var fileSize = evt.fileLength;
+    var self = this;
+    this.checkStorageSpace(fileSize,
+      function checkStorageSpaceComplete(isStorageAvailable, errorMessage) {
+        var adapter = Bluetooth.getAdapter();
+        var option = (isStorageAvailable) ? true : false;
+        if (adapter) {
+          adapter.confirmReceivingFile(address, option);
+        } else {
+          var msg = 'Cannot get adapter from system Bluetooth monitor.';
+          self.debug(msg);
+        }
+        // Storage is not available, then pop out a prompt with the reason
+        if (!isStorageAvailable) {
+          self.showStorageUnavaliablePrompt(errorMessage);
+        }
+    });
   },
 
   showStorageUnavaliablePrompt: function bt_showStorageUnavaliablePrompt(msg) {
@@ -260,7 +248,7 @@ var BluetoothTransfer = {
         // skip down to the code below
         break;
       case 'unavailable':
-        callback(false, _('sdcard-not-exist'));
+        callback(false, _('sdcard-not-exist2'));
         return;
       case 'shared':
         callback(false, _('sdcard-in-use'));
@@ -287,6 +275,29 @@ var BluetoothTransfer = {
     availreq.onerror = function(e) {
       callback(false, _('cannotGetStorageState'));
     };
+  },
+
+  sendFile: function bt_sendFile(mac, blob) {
+    var adapter = Bluetooth.getAdapter();
+    if (adapter != null) {
+      var sendingFilesSchedule = {
+        numberOfFiles: 1,
+        numSuccessful: 0,
+        numUnsuccessful: 0
+      };
+      this.onFilesSending({detail: sendingFilesSchedule});
+      // XXX: Bug 915602 - [Bluetooth] Call sendFile api will crash
+      // the system while device is just paired.
+      // The paired device is ready to send file.
+      // Since above issue is existed, we use a setTimeout with 3 secs delay
+      var waitConnectionReadyTimeoutTime = 3000;
+      setTimeout(function() {
+        adapter.sendFile(mac, blob);
+      }, waitConnectionReadyTimeoutTime);
+    } else {
+      var msg = 'Cannot get adapter from system Bluetooth monitor.';
+      this.debug(msg);
+    }
   },
 
   onUpdateProgress: function bt_onUpdateProgress(mode, evt) {
@@ -351,21 +362,17 @@ var BluetoothTransfer = {
     var address = evt.address;
     var id = 'div[data-id="' + address + '"]';
     var finishedTask = this.transferStatusList.querySelector(id);
+    // If we decline receiving file, Bluetooth won't callback
+    // 'bluetooth-opp-transfer-start', 'bluetooth-opp-update-progress' event.
+    // So that there is no progress element which was created on notification.
+    // There is only 'bluetooth-opp-transfer-complete' event to notify Gaia the
+    // transferring request in failed case.
+    if (finishedTask == null)
+      return;
+
     finishedTask.removeEventListener('click',
                                      this.onCancelTransferTask.bind(this));
     this.transferStatusList.removeChild(finishedTask);
-  },
-
-  showBanner: function bt_showBanner(isComplete) {
-    var _ = navigator.mozL10n.get;
-    var status = (isComplete) ? _('complete') : _('failed');
-    this.banner.addEventListener('animationend', function animationend() {
-      this.banner.removeEventListener('animationend', animationend);
-      this.banner.classList.remove('visible');
-    }.bind(this));
-    this.bannerContainer.textContent = _('bluetooth-file-transfer-result',
-      { status: status });
-    this.banner.classList.add('visible');
   },
 
   onCancelTransferTask: function bt_onCancelTransferTask(evt) {
@@ -409,19 +416,20 @@ var BluetoothTransfer = {
 
   onTransferComplete: function bt_onTransferComplete(evt) {
     var transferInfo = evt.detail.transferInfo;
+    if (NfcHandoverManager.isHandoverInProgress()) {
+      // Inform NfcHandoverManager that the transfer completed
+      NfcHandoverManager.transferComplete(transferInfo.success);
+    }
     var _ = navigator.mozL10n.get;
     // Remove transferring progress
     this.removeProgress(transferInfo);
     var fileName =
       (transferInfo.fileName) ? transferInfo.fileName : _('unknown-file');
     var icon = 'style/bluetooth_transfer/images/icon_bluetooth.png';
-    // Show banner and notification
+    // Show notification
     if (transferInfo.success == true) {
-       // Show completed message of transferred result on the banner
-      this.showBanner(true);
       if (transferInfo.received) {
         // Received file can be opened only
-        // TODO: Need to modify the icon after visual provide
         NotificationHelper.send(_('transferFinished-receivedSuccessful-title'),
                                 fileName,
                                 icon,
@@ -432,8 +440,6 @@ var BluetoothTransfer = {
                                 icon);
       }
     } else {
-      // Show failed message of transferred result on the banner
-      this.showBanner(false);
       if (transferInfo.received) {
         NotificationHelper.send(_('transferFinished-receivedFailed-title'),
                                 fileName,
@@ -444,12 +450,62 @@ var BluetoothTransfer = {
                                 icon);
       }
     }
+
+    // Have a report notification for sending multiple files.
+    this.summarizeSentFilesReport(transferInfo);
+  },
+
+  summarizeSentFilesReport: function bt_summarizeSentFilesReport(transferInfo) {
+    var _ = navigator.mozL10n.get;
+
+    // Ignore received files
+    if (transferInfo.received)
+      return;
+
+    // Consumer: System app consume each sending file request from Bluetooth app
+    var msg = 'remove the finished sending task from queue, queue length = ';
+    var successful = transferInfo.success;
+    var sendingFilesSchedule = this._sendingFilesQueue[0];
+    var numberOfFiles = sendingFilesSchedule.numberOfFiles;
+    if (numberOfFiles == 1) { // The scheduled task is for sent one file only.
+      // We don't need to summarize a report for sent one file only.
+      // Remove the finished sending task from the queue
+      this._sendingFilesQueue.shift();
+      msg += this._sendingFilesQueue.length;
+      this.debug(msg);
+    } else { // The scheduled task is for sent multiple files.
+      // Create a report in notification.
+      // Record each transferring report.
+      if (successful) {
+        this._sendingFilesQueue[0].numSuccessful++;
+      } else {
+        this._sendingFilesQueue[0].numUnsuccessful++;
+      }
+
+      var numSuccessful = this._sendingFilesQueue[0].numSuccessful;
+      var numUnsuccessful = this._sendingFilesQueue[0].numUnsuccessful;
+      if ((numSuccessful + numUnsuccessful) == numberOfFiles) {
+        // In this item of queue, all files were sent completely.
+        var icon = 'style/bluetooth_transfer/images/icon_bluetooth.png';
+        NotificationHelper.send(_('transferReport-title'),
+                                _('transferReport-description',
+                                { numSuccessful: numSuccessful,
+                                  numUnsuccessful: numUnsuccessful }),
+                                icon);
+
+        // Remove the finished sending task from the queue
+        this._sendingFilesQueue.shift();
+        msg += this._sendingFilesQueue.length;
+        this.debug(msg);
+      }
+    }
   },
 
   openReceivedFile: function bt_openReceivedFile(evt) {
     // Launch the gallery with an open activity to view this specific photo
-    // XXX: The prefix file path should be refined when API is ready to provide
-    var filePath = 'downloads/bluetooth/' + evt.fileName;
+    // XXX: Bug 897434 - Save received/downloaded files in one specific folder
+    // with meaningful path and filename
+    var filePath = 'Download/Bluetooth/' + evt.fileName;
     var contentType = evt.contentType;
     var storageType = 'sdcard';
     var self = this;
@@ -467,54 +523,52 @@ var BluetoothTransfer = {
       var file = getreq.result;
       // When we got the file by storage type of "sdcard"
       // use the file.type to replace the empty fileType which is given by API
-      var fileType = '';
       var fileName = file.name;
-      if (contentType != '' && contentType != 'image/*') {
-        fileType = contentType;
-      } else {
-        var fileNameExtension =
-          fileName.substring(fileName.lastIndexOf('.') + 1);
-        if (file.type != '') {
-          fileType = file.type;
-          // Refine the file type to "audio/ogg" when the file format is *.ogg
-          if (fileType == 'video/ogg' &&
-              (fileNameExtension.indexOf('ogg') != -1)) {
-            fileType == 'audio/ogg';
-          }
-        } else {
-          // Parse Filename Extension to find out MIMETYPE
-          fileType = self.getMimetype(fileNameExtension);
-        }
-      }
+      var extension = fileName.split('.').pop();
+      var originalType = file.type || contentType;
+      var mappedType = (MimeMapper.isSupportedType(originalType)) ?
+        originalType : MimeMapper.guessTypeFromExtension(extension);
 
-      var a = new MozActivity({
-        name: 'open',
+      var activityOptions = {
         data: {
-          type: fileType,
+          type: mappedType,
           blob: file,
           // XXX: https://bugzilla.mozilla.org/show_bug.cgi?id=812098
           // Pass the file name for Music APP since it can not open blob
-          filename: file.name
+          filename: fileName
         }
-      });
+      };
+
+      switch (mappedType) {
+        case 'text/vcard':
+          activityOptions.name = 'import';
+          break;
+        default:
+          activityOptions.name = 'open';
+      }
+      var a = new MozActivity(activityOptions);
 
       a.onerror = function(e) {
         var msg = 'open activity error:' + a.error.name;
         self.debug(msg);
-        // Cannot identify MIMETYPE
-        // So, show cannot open file dialog with unknow media type
-        UtilityTray.hide();
-        self.showUnknownMediaPrompt(fileName);
+        switch (a.error.name) {
+        case 'NO_PROVIDER':
+          UtilityTray.hide();
+          // Cannot identify MIMETYPE
+          // So, show cannot open file dialog with unknow media type
+          self.showUnknownMediaPrompt(fileName);
+          return;
+        case 'ActivityCanceled':
+        case 'USER_ABORT':
+        default:
+          return;
+        }
       };
       a.onsuccess = function(e) {
         var msg = 'open activity onsuccess';
         self.debug(msg);
       };
     };
-  },
-
-  getMimetype: function bt_getMimetype(fileNameExtension) {
-    return FileFormats[fileNameExtension];
   },
 
   showUnknownMediaPrompt: function bt_showUnknownMediaPrompt(fileName) {

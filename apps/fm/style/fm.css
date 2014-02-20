@@ -5,13 +5,9 @@ html, body {
   height: 100%;
   overflow: hidden;
   color: #FFF;
-  font-family: 'MozTT', sans-serif;
   font-size: 10px;
 }
 
-body {
-  background: url("images/app-texture.png") repeat scroll 0 0 #272D32;
-}
 
 a {
   outline: 0 none;
@@ -31,6 +27,7 @@ a:active {
 #container {
   height: 100%;
   width: 100%;
+  background-color: #272d32;
 }
 
 #container > div {
@@ -45,8 +42,14 @@ a:active {
   height: 10rem;
   width: 100%;
   text-align: center;
-  background: -moz-linear-gradient(center top , #33373C, #43464B) repeat scroll 0 0 transparent;
+  background-color:	#43464B;
+  background-image: -moz-linear-gradient(#33373C, rgba(0, 0, 0, 0));
   overflow: hidden;
+  transition: background-color 680ms ease;
+}
+
+#frequency-bar.dim {
+  background-color: #232323;
 }
 
 #frequency-bar > div {
@@ -64,6 +67,15 @@ a:active {
   display: inline-block;
   margin-top: 3rem;
   box-shadow: 0 -.1rem .1rem #111;
+}
+
+#frequency-display {
+  position: relative;
+  transition: opacity 680ms ease;
+}
+
+.dim #frequency-display {
+  opacity: 0.1;
 }
 
 #bookmark-button {
@@ -90,15 +102,6 @@ a:active {
   padding-left: 0.3rem;
 }
 
-#frequency[data-seek-dir="up"] {
-  background: url("images/spinner-right.png") no-repeat center 8.5rem transparent;
-}
-
-
-#frequency[data-seek-dir="down"] {
-  background: url("images/spinner-left.png") no-repeat center 8.5rem transparent;
-}
-
 #bookmark-button {
   background: url("images/toggle-fav-star-off.png") no-repeat center center / 4rem;
 }
@@ -114,6 +117,25 @@ a:active {
 
 #bookmark-button[data-bookmarked="true"] {
   background: url("images/toggle-fav-star-on.png") no-repeat center center / 4rem;
+}
+
+#speaker-switch {
+  top: 0;
+  left: 2rem;
+  background: url("images/speaker-off.png") no-repeat center center / 4rem;
+}
+
+#speaker-switch:focus {
+  border-color: #888;
+}
+
+#speaker-switch:active,
+#speaker-switch[data-speaker-on="true"]:active {
+  background: #00ABCD url("images/speaker-pressed.png") no-repeat center center / 4rem;
+}
+
+#speaker-switch[data-speaker-on="true"] {
+  background: url("images/speaker-on.png") no-repeat center center / 4rem;
 }
 /*****  end  *****/
 
@@ -209,25 +231,33 @@ div#fav-list-container {
   width: 100%;
 }
 
+div#fav-list-container > div:before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 2rem;
+  right: 2rem;
+  width: calc(100% - 4rem);
+  height: .1rem;
+  background-color: #3D4045;
+}
+
 div#fav-list-container > div {
+  position: relative;
   font-size: 2.3rem;
   font-weight: 300;
   height: 4.4rem;
-  margin: 0 2rem 0.2rem 2rem;
+  padding-bottom: 0.2rem;
   clear: both;
-  border-top: .1rem solid #3D4045;
 }
 
 div#fav-list-container > div:active {
-  background-color: #00ABCD;
+  background-color: rgba(52,140,158, .6);
 }
 
-div#fav-list-container > div:first-child {
-  border-top: none;
-}
-
-div#fav-list-container > div:last-child {
-  border-top: .1rem solid #3D4045;
+div#fav-list-container > div:active:before,
+div#fav-list-container > div:active + div:before {
+  background-color: transparent;
 }
 
 div#fav-list-container div.fav-list-remove-button {
@@ -245,7 +275,7 @@ div#fav-list-container div.selected div.fav-list-remove-button {
 
 div#fav-list-container div.fav-list-frequency {
   float: right;
-  padding: 0.8rem -moz-calc(50% - 0.2rem) 0 0;
+  padding: 0.8rem -moz-calc(50% - 2.4rem) 0 0;
   text-align: right;
   width: 6rem;
 }
@@ -291,9 +321,9 @@ div#fav-list-container div.fav-list-frequency::after {
 #action-bar a {
   display: inline-block;
   border: none;
+  font-size: 2.5rem;
   width: 7rem;
   height: 7rem;
-  font-size: 2.5rem;
   border-radius: 50%;
   text-align: center;
   box-shadow: 0 .1rem .1rem #A8A8A8 inset, 0 .2rem 0 #1e2226;
@@ -305,12 +335,14 @@ div#fav-list-container div.fav-list-frequency::after {
   box-shadow: 0 .1rem .1rem #3F6978 inset, 0 .2rem 0 #1e2226;
 }
 
-#power-switch {
+#power-switch, #power-switch span {
   background-image: url(images/play.png), url(images/reflection-72.png);
   background-repeat: no-repeat, no-repeat;
   background-color: transparent;
   background-position: center center, 0 0;
   background-size: 7.2rem;
+  overflow: hidden;
+  position: relative;
 }
 
 #power-switch:active {
@@ -323,6 +355,32 @@ div#fav-list-container div.fav-list-frequency::after {
 
 #power-switch[data-enabled="true"]:active {
   background-image: url(images/stop.png);
+}
+
+#power-switch span {
+  background-image: url(images/spinner-FMRadio.png);
+  background-size: 6.6rem;
+  display: none;
+  height: 6.6rem;
+  left: 0.2rem;
+  position: absolute;
+  top: 0.2rem;
+  width: 6.6rem;
+}
+
+#power-switch[data-enabling="true"] span,
+#power-switch[data-seeking="true"] span {
+  animation: 0.9s spinner-animation infinite steps(30);
+  display: block;
+}
+
+@keyframes spinner-animation {
+  from {
+    transform: rotate(1deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 a#frequency-op-seekdown {
@@ -356,16 +414,42 @@ a#frequency-op-seekup:active {
 }
 /**** end ****/
 
-/***  styles for antenna warning box ****/
-#antenna-warning {
+/***  styles for  warning box ****/
+.warning {
   position: absolute;
   width: 100%;
   height: 100%;
   top: 0;
   left: 0;
-  z-index: 2;
   color: #FFF;
-  background: url(images/popup-texture.png) repeat 0 0 #272d32;
+  background: url(images/popup-texture.png) transparent repeat 0 0 / 100% 100%;
+}
+
+.warning .warning-header {
+  padding: 1rem 3rem 1rem 3rem;
+  font-weight: normal;
+  font-size: 1.9rem;
+  color: #fff;
+}
+
+.warning .warning-body {
+  font-weight: 300;
+  font-size: 2.5rem;
+  padding: .5rem;
+  border-top: .1rem solid #686868;
+  margin: 0 2.5rem;
+}
+
+/* Press (default & recommend) */
+.warning .menu button:active {
+  border-color: #008aaa;
+  color: #333;
+}
+/**** end ****/
+
+/***  styles for antenna warning box ****/
+#antenna-warning {
+  z-index: 2;
 }
 
 #antenna-warning > div:first-child {
@@ -373,26 +457,18 @@ a#frequency-op-seekup:active {
   background: url(images/headset.png) no-repeat center center / 18.4rem;
 }
 
-#antenna-warning-header {
-  padding: 1rem 3rem 1rem 3rem;
-  font-weight: normal;
-  font-size: 1.9rem;
-  color: #fff;
+#antenna-warning .warning-header {
   margin-top: -2.5rem;
-}
-
-#antenna-warning-body {
-  font-weight: 300;
-  font-size: 2.5rem;
-  padding: .5rem;
-  margin: 0 2.5rem;
-  border-top: .1rem solid #686868;
 }
 /******* end *******/
 
-/* localization */
-body.hidden *[data-l10n-id] {
-  visibility: hidden;
+/***  styles for airplane mode warning box ****/
+#airplane-mode-warning {
+  z-index: 3;
+}
+
+#airplane-mode-warning .warning-header {
+  margin-top: 50%;
 }
 /******* end *******/
 

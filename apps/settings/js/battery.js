@@ -87,13 +87,18 @@ navigator.mozL10n.ready(function SettingsBattery() {
   Battery.init(updateInfo);
   Battery.update();
 
-  document.addEventListener('mozvisibilitychange', function visibilityChange() {
-    if (!document.mozHidden) {
+  document.addEventListener('visibilitychange', function visibilityChange() {
+    if (!document.hidden) {
       Battery.attachListeners();
       Battery.update();
     } else {
       Battery.detachListeners();
     }
   });
-});
 
+  window.addEventListener('panelready', function(e) {
+    if (e.detail.current === '#battery') {
+      Battery.update();
+    }
+  });
+});

@@ -5,7 +5,6 @@ requireLib('models/account.js');
 requireApp('calendar/test/unit/helper.js');
 
 suite('store/abstract', function() {
-
   var subject;
   var db;
   var app;
@@ -135,7 +134,6 @@ suite('store/abstract', function() {
       });
 
       test('result', function(done) {
-        this.timeout(400);
         var trans;
         var obj = { name: 'foo' };
         var callbackFired = false;
@@ -257,6 +255,7 @@ suite('store/abstract', function() {
     });
 
     setup(function(done) {
+      var preRemoveCalled = false;
       callbackCalled = false;
       removeDepsCalled = false;
 
@@ -264,9 +263,16 @@ suite('store/abstract', function() {
         removeDepsCalled = arguments;
       };
 
+      subject.once('preRemove', function(_id) {
+        assert.equal(id, _id, 'same id');
+        preRemoveCalled = true;
+      });
+
       subject.remove(id, function() {
         callbackCalled = true;
       });
+
+      assert.ok(preRemoveCalled, 'removes event');
 
       subject.once('remove', function() {
         removeEvent = arguments;

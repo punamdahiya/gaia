@@ -29,9 +29,15 @@ var InitLogoHandler = {
   },
 
   init: function ilh_init(logoLoader) {
+    window.addEventListener('ftuopen', this);
+    window.addEventListener('ftuskip', this);
     this.logoLoader = logoLoader;
     logoLoader.onnotfound = this._removeCarrierPowerOn.bind(this);
     logoLoader.onload = this._appendCarrierPowerOn.bind(this);
+  },
+
+  handleEvent: function ilh_handleEvent() {
+    this.animate();
   },
 
   _removeCarrierPowerOn: function ilh_removeCarrierPowerOn() {
@@ -42,7 +48,9 @@ var InitLogoHandler = {
     } else {
       var self = this;
       document.addEventListener('DOMContentLoaded', function() {
-        self.carrierLogo.parentNode.removeChild(self.carrierLogo);
+        if (self.carrierLogo) {
+          self.carrierLogo.parentNode.removeChild(self.carrierLogo);
+        }
         self._setReady();
       });
     }
@@ -63,6 +71,18 @@ var InitLogoHandler = {
 
   _setReady: function ilh_setReady() {
     this.ready = true;
+    var elem = this.logoLoader.element;
+    if (elem && elem.tagName.toLowerCase() == 'video') {
+      // Play video just after the element is first painted.
+      window.addEventListener('mozChromeEvent', function startVideo(e) {
+        if (e.detail.type == 'system-first-paint') {
+          window.removeEventListener('mozChromeEvent', startVideo);
+          if (elem && elem.ended === false) {
+            elem.play();
+          }
+        }
+      });
+    }
     if (this.readyCallBack) {
       this.readyCallBack();
       this.readyCallBack = null;
@@ -97,7 +117,10 @@ var InitLogoHandler = {
       self.carrierLogo.className = 'transparent';
 
       var elem = self.logoLoader.element;
-      if (elem.tagName == 'VIDEO' && !elem.ended) {
+      if (elem.tagName.toLowerCase() == 'video' && !elem.ended) {
+        // compability: ensure movie being played here in case
+        // system-first-paint is not supported by Gecko.
+        elem.play();
         elem.onended = function() {
           elem.classList.add('hide');
         };
@@ -109,7 +132,15 @@ var InitLogoHandler = {
       function transCarrierLogo(evt) {
         evt.stopPropagation();
         self.carrierLogo.removeEventListener('transitionend', transCarrierLogo);
+        if (elem.tagName.toLowerCase() == 'video') {
+          // XXX workaround of bug 831747
+          // Unload the video. This releases the video decoding hardware
+          // so other apps can use it.
+          elem.removeAttribute('src');
+          elem.load();
+        }
         self.carrierLogo.parentNode.removeChild(self.carrierLogo);
+
         self.osLogo.classList.add('hide');
         self.carrierPowerOnElement = null;
       });

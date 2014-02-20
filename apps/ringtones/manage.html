@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1">
+    <meta charset="utf-8" />
+    <title>System Ringtones</title>
+    <link rel="stylesheet" type="text/css" href="shared/style/headers.css"/>
+    <link rel="stylesheet" type="text/css" href="shared/style/switches.css"/>
+    <link rel="stylesheet" type="text/css" href="style/lists.css"/>
+    <link rel="stylesheet" type="text/css" href="style/ringtones.css"/>
+    <!-- shared resources -->
+    <!-- this is here so the directory gets copied -->
+    <link rel="resource" type="application/json" href="shared/resources/media/ringtones/"/>
+    <link rel="resource" type="application/json" href="shared/resources/media/notifications/"/>
+    <!-- Localization -->
+    <link rel="resource" type="application/l10n" href="locales/locales.ini" />
+    <script type="text/javascript" src="shared/js/l10n.js"></script>
+    <script type="text/javascript" src="shared/js/template.js"></script>
+
+    <script type="text/javascript" defer src="js/utils.js"></script>
+    <script type="text/javascript" defer src="js/default_ringtones.js"></script>
+    <script type="text/javascript" defer src="js/custom_ringtones.js"></script>
+    <script type="text/javascript" defer src="js/tone_picker.js"></script>
+    <script type="text/javascript" defer src="js/manage.js"></script>
+  </head>
+
+  <body>
+    <section role="region" class="skin-organic">
+      <header>
+        <button id="back"><span class="icon icon-back"></span></button>
+        <h1 id="title"></h1>
+      </header>
+
+      <article>
+        <section id="default-tones" hidden>
+          <header>
+            <h2 id="default-title"></h2>
+          </header>
+          <ul id="default-list"></ul>
+        </section>
+
+        <section id="custom-tones" hidden>
+          <header>
+            <h2 id="custom-title"></h2>
+          </header>
+          <ul id="custom-list"></ul>
+        </section>
+      </article>
+    </section>
+    <div id="sound-item-template" hidden>
+      <!-- <li>
+        <label class="pack-radio">
+          <input type="radio" name="sounds"/>
+          <span data-l10n-id="${l10nId}">${name}</span>
+        </label>
+      </li> -->
+  </div>
+  </body>
+</html>

@@ -9,7 +9,13 @@ window.ContactsCleaner = function(contacts) {
   var numResponses = 0;
   var notifyClean = false;
 
+  var mustHold = false;
+  var holded = false;
+  var mustFinish = false;
+
   this.start = function() {
+    mustHold = holded = mustFinish = false;
+
     if (total > 0) {
       cleanContacts(0);
     }
@@ -18,8 +24,28 @@ window.ContactsCleaner = function(contacts) {
     }
   };
 
+  this.hold = function() {
+    mustHold = true;
+  };
+
+  this.finish = function() {
+    mustFinish = true;
+
+    if (holded) {
+      notifySuccess();
+    }
+  };
+
+  this.resume = function() {
+    mustHold = holded = mustFinish = false;
+
+    window.setTimeout(function resume_clean() {
+      cleanContacts(next);
+    });
+  };
+
   this.performClean = function(contact, number, cbs) {
-    var req = navigator.mozContacts.remove(contact);
+    var req = navigator.mozContacts.remove(utils.misc.toMozContact(contact));
     req.number = number;
     req.onsuccess = cbs.success;
     req.onerror = function(e) {
@@ -56,18 +82,31 @@ window.ContactsCleaner = function(contacts) {
     }
   }
 
+  function notifySuccess() {
+    if (typeof self.onsuccess === 'function') {
+      window.setTimeout(self.onsuccess);
+    }
+  }
+
   function continueCb() {
     next++;
     numResponses++;
     if (next < total && numResponses === CHUNK_SIZE) {
       numResponses = 0;
-      cleanContacts(next);
+      if (!mustHold && !mustFinish) {
+        cleanContacts(next);
+      }
+      else if (mustFinish && !holded) {
+        notifySuccess();
+      }
+
+      if (mustHold) {
+        holded = true;
+      }
     }
     else if (next >= total) {
       // End has been reached
-      if (typeof self.onsuccess === 'function') {
-        window.setTimeout(self.onsuccess, 0);
-      }
+      notifySuccess();
     }
   } // function
 }; // ContactsCleaner

@@ -1,17 +1,31 @@
 'use strict';
 
+requireApp('homescreen/test/unit/mock_l10n.js');
 requireApp('homescreen/test/unit/mock_home_state.js');
 requireApp('homescreen/test/unit/mock_app.js');
 requireApp('homescreen/test/unit/mock_xmlhttprequest.js');
+requireApp('homescreen/test/unit/mock_icon_retriever.js');
+requireApp('homescreen/test/unit/mock_grid_components.js');
+requireApp('homescreen/test/unit/mock_dock_manager.js');
 requireApp('homescreen/test/unit/mock_grid_manager.js');
+requireApp('homescreen/test/unit/mock_configurator.js');
+
+require('/shared/js/screen_layout.js');
+
+requireApp('homescreen/test/unit/mock_page.html.js');
 
 requireApp('homescreen/js/page.js');
 
 var mocksHelperForPage = new MocksHelper([
   'HomeState',
   'XMLHttpRequest',
-  'GridManager'
+  'IconRetriever',
+  'GridItemsFactory',
+  'DockManager',
+  'GridManager',
+  'Configurator'
 ]);
+
 mocksHelperForPage.init();
 
 suite('page.js >', function() {
@@ -67,7 +81,8 @@ suite('page.js >', function() {
         done();
       }
 
-      icon.render(iconsContainer);
+      icon.render();
+      iconsContainer.appendChild(icon.container);
 
       // icon.img is instanciated in icon.render
       var img = icon.img;
@@ -170,8 +185,8 @@ suite('page.js >', function() {
         assertIconIsRendered();
         dragSuite();
 
-        test('should not use XHR to get the icon', function() {
-          assert.isUndefined(MockXMLHttpRequest.mLastOpenedUrl);
+        test('should use XHR to get the icon', function() {
+          assert.ok(MockXMLHttpRequest.mLastOpenedUrl);
         });
       });
 
@@ -206,9 +221,6 @@ suite('page.js >', function() {
 
         suite('XHR throws an exception >', function() {
           setup(function(done) {
-            // in this case, the code is using an Image to fetch a png, and this
-            // sometimes is slow even if the server is local
-            this.timeout(5000);
             MockXMLHttpRequest.mThrowAtNextSend();
             renderIcon(done);
           });
@@ -250,9 +262,6 @@ suite('page.js >', function() {
 
         suite('XHR throws an exception >', function() {
           setup(function(done) {
-            // in this case, the code is using an Image to fetch a png, and this
-            // sometimes is slow even if the server is local
-            this.timeout(5000);
             MockXMLHttpRequest.mThrowAtNextSend();
             renderIcon(done);
           });
@@ -261,6 +270,158 @@ suite('page.js >', function() {
         });
       });
 
+      suite('removable and non-removable icons >', function() {
+        function createIcon(removable, done) {
+          var app = new MockApp();
+          var descriptor = {
+            manifestURL: app.manifestURL,
+            name: app.name,
+            removable: removable
+          };
+
+          icon = new Icon(descriptor, app);
+          renderIcon(done);
+
+          return icon;
+        }
+
+        test('icon should be removable', function(done) {
+          createIcon(true, function() {
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 1);
+            done();
+          });
+        });
+
+        test('icon should not be removable', function(done) {
+          createIcon(false, function() {
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 0);
+            done();
+          });
+        });
+
+        test('non removable icon will be removable after updating',
+             function(done) {
+          var icon = createIcon(false, function() {
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 0);
+            icon.update({
+              removable: true
+            });
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 1);
+            done();
+          });
+        });
+
+        test('removable icon will be non removable after updating',
+             function(done) {
+          var icon = createIcon(true, function() {
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 1);
+            icon.update({
+              removable: false
+            });
+            assert.equal(iconsContainer.querySelectorAll('li span.options').
+                         length, 0);
+            done();
+          });
+        });
+      });
+
+      suite('icons > getDescriptor works fine', function() {
+        function createIcon(isDefault) {
+          var app = new MockApp();
+          var descriptor = {
+            manifestURL: app.manifestURL,
+            name: app.name,
+            renderedIcon: 'rendered'
+          };
+
+          icon = new Icon(descriptor, app);
+          icon.isDefault = isDefault;
+
+          return icon;
+        }
+
+        test('renderedIcon is not defined for icons by default ', function() {
+          createIcon(true, function(icon) {
+            assert.isNull(icon.getDescriptor().renderedIcon);
+          });
+        });
+
+        test('renderedIcon is defined for icons with correct rendered image ',
+             function() {
+          createIcon(false, function(icon) {
+            assert.equal(icon.getDescriptor().renderedIcon, 'rendered');
+          });
+        });
+
+      });
+
+      suite('Offline ready apps >', function() {
+        function createIcon(data, done) {
+          var app = new MockApp();
+          var descriptor = {
+            manifestURL: app.manifestURL,
+            name: app.name
+          };
+
+          for (var key in data) {
+            descriptor[key] = data[key];
+          }
+
+          icon = new Icon(descriptor, app);
+          renderIcon(done);
+        }
+
+        function checkOfflineReady(value) {
+          assert.equal(iconsContainer.
+                              querySelector('li').dataset.offlineReady, value);
+        }
+
+        test('Hosted apps with appcache are offline ready apps ',
+             function(done) {
+          createIcon({
+            isHosted: true,
+            hasOfflineCache: true
+          }, function() {
+            checkOfflineReady('true');
+            done();
+          });
+        });
+
+        test('Non hosted apps are offline ready apps ', function(done) {
+          createIcon({
+            isHosted: false
+          }, function() {
+            checkOfflineReady('true');
+            done();
+          });
+        });
+
+        test('Hosted apps without appcache are not offline ready apps ',
+             function(done) {
+          createIcon({
+            isHosted: true,
+            hasOfflineCache: false
+          }, function() {
+            checkOfflineReady('false');
+            done();
+          });
+        });
+
+        test('Bookmarks are not offline ready apps ', function(done) {
+          createIcon({
+            type: GridItemsFactory.TYPE.BOOKMARK
+          }, function() {
+            checkOfflineReady('false');
+            done();
+          });
+        });
+
+      });
 
     });
 
@@ -285,8 +446,209 @@ suite('page.js >', function() {
       dragSuite();
 
     });
+  });
 
+  suite('page >', function() {
 
+    suite('getMisplacedIcons', function() {
+      var wrapperNode = null;
+      var page = null;
 
+      var testData = [
+        {
+          name: 'Page without incorrectly placed icons ',
+          id: 'getMisplacedIconsPage1',
+          desiredScreen: 2,
+          result: [],
+          msgError: ''
+        },
+        {
+          name: 'Page only with a incorrectly placed icon ',
+          id: 'getMisplacedIconsPage2',
+          desiredScreen: 2,
+          result: [
+            {
+              'manifestURL': 'http://app21'
+            }
+          ],
+          msgError: ''
+        },
+        {
+          name: 'Page only with incorrectly placed icons ',
+          id: 'getMisplacedIconsPage3',
+          desiredScreen: 2,
+          result: [
+            {
+              'manifestURL': 'http://app31'
+            },
+            {
+              'manifestURL': 'http://app32'
+            }
+          ],
+          msgError: ''
+        },
+        {
+          name: 'Page with a misplaced icon and correctly place icons ',
+          id: 'getMisplacedIconsPage4',
+          desiredScreen: 2,
+          result: [
+            {
+              'manifestURL': 'http://app42'
+            }
+          ],
+          msgError: ''
+        },
+        {
+          name: 'Page with correct icons and more than one misplaced icons ',
+          id: 'getMisplacedIconsPage5',
+          desiredScreen: 2,
+          result: [
+            {
+              'manifestURL': 'http://app51'
+            },
+            {
+              'manifestURL': 'http://app54'
+            }
+          ],
+          msgError: ''
+        }
+      ];
+
+      suiteSetup(function() {
+        wrapperNode = document.createElement('section');
+        wrapperNode.innerHTML = MockPageHtml;
+        document.body.appendChild(wrapperNode);
+      });
+
+      function assertIfIconIsPresent(manifest, lstManifest, msgError) {
+        var isPresent = false;
+        for (var i = 0; i < lstManifest.length && !isPresent; i++) {
+          isPresent = lstManifest[i].manifestURL === manifest;
+        }
+        assert.isTrue(isPresent, manifest + ' ' + msgError);
+      }
+
+      function initContext(aDatas) {
+        page = new Page(document.getElementById(aDatas.id));
+        page.olist = document.querySelector('#' + aDatas.id + ' > ol');
+        GridManager.init(page);
+      };
+
+      testData.forEach(function(aTest) {
+        test(aTest.name, function() {
+            initContext(aTest);
+            var removed = page.getMisplacedIcons(aTest.desiredScreen);
+            assert.ok(removed, 'Icons array no recibido');
+            assert.equal(removed.length, aTest.result.length,
+                         'Incorrect number of icons returned');
+            var removedParsed = [];
+            for (var i = 0; i < removed.length; i++) {
+              assert.ok(removed[i].draggableElem.dataset.manifestURL,
+                        'Icon returned incorrectly formed');
+              var manifestNow = removed[i].draggableElem.dataset.manifestURL;
+              removedParsed.push({'manifestURL': manifestNow});
+              assertIfIconIsPresent(manifestNow, aTest.result,
+                                    'Incorrect icon returned');
+            }
+            for (var i = 0; i < aTest.result.length; i++) {
+              assertIfIconIsPresent(aTest.result[i].manifestURL, removedParsed,
+                                    'Icon not returned');
+            }
+        });
+      });
+
+      suiteTeardown(function() {
+        document.body.removeChild(wrapperNode);
+      });
+    });
+
+    suite('appendIcon >', function() {
+
+      var wrapperNode = null;
+      var page = null;
+      var initLength = 0;
+      var app;
+      var testData = [
+        {
+          name: 'at the end',
+          manifestURL: 'https://aHost/aMan1'
+        },
+        {
+          desiredPos: 3,
+          name: 'on the middle',
+          manifestURL: 'https://aHost/aMan2'
+        },
+        {
+          desiredPos: 1,
+          name: 'on the middle, with existing fixed icons',
+          manifestURL: 'https://aHost/aMan3'
+        },
+        {
+          desiredPos: 0,
+          name: 'at the first position, with existing fixed icons',
+          manifestURL: 'https://aHost/aMan4'
+        }
+      ];
+
+      suiteSetup(function() {
+        wrapperNode = document.createElement('section');
+        wrapperNode.innerHTML = MockPageHtml;
+        document.body.appendChild(wrapperNode);
+
+        page = new Page(document.getElementById('appendIconPage'));
+        page.olist = document.querySelector('#appendIconPage > ol');
+        GridManager.init(page);
+      });
+
+      //Test 1st boot with SIM
+      let svTestList = [{descr: '1st boot WITH sim. ', simPresent: true},
+                        {descr: '1st boot WITHOUT sim. ', simPresent: false}];
+      for (var i = 0; i < svTestList.length; i++) {
+        testData.forEach((function(bootType, aTest) {
+          test(bootType.descr +
+               'Icon has been added on the correct position ' + aTest.name,
+               function() {
+            Configurator.mSimPresentOnFirstBoot = bootType.simPresent;
+            initLength = page.olist && page.olist.children &&
+                         page.olist.children.length;
+            app = new MockApp({'manifestURL' : aTest.manifestURL,
+                               'name': aTest.name});
+            var descriptor = {
+               manifestURL: app.manifestURL,
+               name: app.name,
+               icon: 'data:image/png;base64,iVBORw0KGgoA',
+               desiredPos: aTest.desiredPos
+            };
+            var icon = new Icon(descriptor, app);
+            page.appendIcon(icon);
+            var addedIcon =
+              page.olist.children[aTest.desiredPos !== undefined &&
+                                  bootType.simPresent ?
+                                  aTest.desiredPos :
+                                  initLength];
+            assert.equal(page.olist.children.length, initLength + 1,
+                         'Icon has been added');
+            assert.equal(addedIcon.dataset.manifestURL, app.manifestURL,
+                         'Icon is not on the correct position');
+            assert.equal(addedIcon.dataset.desiredPos, aTest.desiredPos,
+                         'Icon desiredPos is not correctly set');
+
+            if (bootType.simPresent) {
+              for (var i = 0; i < initLength + 1; i++) {
+                if (icon.dataset && icon.dataset.desiredPos !== undefined) {
+                  assert.equal(icon.dataset.desiredPos, i,
+                               'An icon is not on its correct position');
+                }
+              }
+            }
+          });
+        }).bind(undefined, svTestList[i]));
+      }
+
+      suiteTeardown(function() {
+        mocksHelperForPage.suiteTeardown();
+        document.body.removeChild(wrapperNode);
+      });
+    });
   });
 });

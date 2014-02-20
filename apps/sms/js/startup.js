@@ -3,58 +3,76 @@
 
 'use strict';
 
-var lazyLoadFiles = [
-  'shared/js/async_storage.js',
-  'shared/js/l10n_date.js',
-  'shared/js/custom_dialog.js',
-  'shared/js/notification_helper.js',
-  'js/blacklist.js',
-  'js/contacts.js',
-  'js/message_manager.js',
-  'js/thread_list_ui.js',
-  'js/thread_ui.js',
-  'js/waiting_screen.js',
-  'js/utils.js',
-  'js/fixed_header.js',
-  'js/activity_picker.js',
-  'js/link_helper.js',
-  'js/action_menu.js',
-  'js/link_action_handler.js',
-  'shared/style/input_areas.css',
-  'shared/style/switches.css',
-  'shared/style/confirm.css',
-  'shared/style_unstable/progress_activity.css',
-  'style/custom_dialog.css',
-  'shared/style/action_menu.css',
-  'shared/style/responsive.css'
-];
+/*global Utils, ActivityHandler, ThreadUI, ThreadListUI, MessageManager,
+         Settings, LazyLoader, TimeHeaders, Information */
 
-window.addEventListener('localized', function showBody() {
+window.addEventListener('localized', function localized() {
+  // This will be called during startup, and any time the languange is changed
+
   // Set the 'lang' and 'dir' attributes to <html> when the page is translated
   document.documentElement.lang = navigator.mozL10n.language.code;
   document.documentElement.dir = navigator.mozL10n.language.direction;
+
+  // Look for any iframes and localize them - mozL10n doesn't do this
+  Array.prototype.forEach.call(document.querySelectorAll('iframe'),
+    function forEachIframe(iframe) {
+      var doc = iframe.contentDocument;
+      doc.documentElement.lang = navigator.mozL10n.language.code;
+      doc.documentElement.dir = navigator.mozL10n.language.direction;
+      navigator.mozL10n.translate(doc.body);
+    }
+  );
+
+  // Also look for l10n-contains-date and re-translate the date message.
+  // More complex because the argument to the l10n string is itself a formatted
+  // date using l10n.
+  Array.prototype.forEach.call(
+    document.getElementsByClassName('l10n-contains-date'),
+    function(element) {
+      if (!(element.dataset.l10nDate && element.dataset.l10nDateFormat)) {
+        return;
+      }
+
+      var format = navigator.mozL10n.get(element.dataset.l10nDateFormat);
+      var date = new Date(+element.dataset.l10nDate);
+      var localeData = Utils.date.format.localeFormat(date, format);
+
+      if (element.dataset.l10nId && element.dataset.l10nArgs) {
+        var args = JSON.parse(element.dataset.l10nArgs);
+        args.date = localeData;
+        navigator.mozL10n.localize(element, element.dataset.l10nId, args);
+      } else {
+        element.textContent = localeData;
+      }
+    }
+  );
+
 });
 
 window.addEventListener('load', function() {
   function initUIApp() {
+    TimeHeaders.init();
+    ActivityHandler.init();
+
     // Init UI Managers
     ThreadUI.init();
     ThreadListUI.init();
-    // We render the threads
-    MessageManager.getThreads(ThreadListUI.renderThreads);
-    // We add activity/system message handlers
-    LazyLoader.load(['js/activity_handler.js']);
+    Information.initDefaultViews();
+    ThreadListUI.renderThreads();
+
+    // Fetch mmsSizeLimitation
+    Settings.init();
   }
 
-  navigator.mozL10n.ready(function waitLocalizedForLoading() {
-    LazyLoader.load(lazyLoadFiles, function() {
-      if (!navigator.mozSms) {
-        LazyLoader.load(['js/sms_mock.js'], function() {
-          MessageManager.init(initUIApp);
-        });
-        return;
-      }
+  if (!navigator.mozMobileMessage) {
+    var mocks = [
+      'js/desktop-only/mobilemessage.js',
+      'js/desktop-only/contacts.js'
+    ];
+    LazyLoader.load(mocks, function() {
       MessageManager.init(initUIApp);
     });
-  });
+    return;
+  }
+  MessageManager.init(initUIApp);
 });

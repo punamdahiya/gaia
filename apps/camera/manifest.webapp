@@ -3,7 +3,7 @@
   "description": "Gaia Camera",
   "type": "certified",
   "launch_path": "/index.html",
-  "orientation": "portrait-primary",
+  "orientation": "default",
   "fullscreen": true,
   "developer": {
     "name": "The Gaia Team",
@@ -27,7 +27,7 @@
     },
     "pick": {
       "filters": {
-        "type": ["image/*", "image/jpeg"]
+        "type": ["image/*", "image/jpeg", "video/*", "video/3gpp"]
        },
       "returnValue": true,
       "disposition": "inline",
@@ -54,7 +54,8 @@
   },
   "default_locale": "en-US",
   "icons": {
-    "120": "/style/icons/Camera.png",
-    "60": "/style/icons/60/Camera.png"
+    "60": "/style/icons/Camera_60.png",
+    "90": "/style/icons/Camera_90.png",
+    "120": "/style/icons/Camera_120.png"
   }
 }

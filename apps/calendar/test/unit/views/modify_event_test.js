@@ -1,5 +1,10 @@
 requireLib('provider/abstract.js');
 requireLib('template.js');
+requireLib('querystring.js');
+requireElements('calendar/elements/modify_event.html');
+requireElements('calendar/elements/show_event.html');
+
+mocha.globals(['InputParser']);
 
 suiteGroup('Views.ModifyEvent', function() {
 
@@ -47,53 +52,40 @@ suiteGroup('Views.ModifyEvent', function() {
     return template.render({ value: html });
   }
 
+  function primaryIsEnabled() {
+    assert.ok(
+      !subject.primaryButton.hasAttribute('aria-disabled'),
+      'button is enabled'
+    );
+  }
+
+  function primaryIsDisabled() {
+    assert.ok(
+      subject.primaryButton.hasAttribute('aria-disabled'),
+      'button is disabled'
+    );
+  }
+
   var triggerEvent;
-  var InputParser;
   suiteSetup(function() {
     triggerEvent = testSupport.calendar.triggerEvent;
-    InputParser = Calendar.Utils.InputParser;
   });
 
   var realGo;
 
   teardown(function() {
-    var el = document.getElementById('test');
-    el.parentNode.removeChild(el);
     Calendar.App.go = realGo;
   });
 
-  setup(function(done) {
-    var div = document.createElement('div');
-    div.id = 'test';
-    div.innerHTML = [
-      '<div id="event-view">',
-        '<button class="edit">edit</button>',
-        '<button class="cancel">cancel</button>',
-      '</div>',
-      '<div id="modify-event-view">',
-        '<button class="save">save</button>',
-        '<button class="cancel">cancel</button>',
-        '<button class="delete-record">delete</button>',
-        '<section role="status">',
-          '<div class="errors"></div>',
-        '</section>',
-        '<form>',
-          '<input type="checkbox" name="allday" />',
-          '<input name="title" />',
-          '<input type="date" name="startDate" />',
-          '<input type="date" name="endDate" />',
-          '<input type="time" name="startTime" />',
-          '<input type="time" name="endTime" />',
-          '<input name="location" />',
-          '<textarea name="description"></textarea>',
-          '<input name="currentCalendar" />',
-          '<select name="calendarId"></select>',
-          '<div class="alarms"></div>',
-        '</form>',
-      '</div>'
-    ].join('');
+  suiteTemplate('show-event', {
+    id: 'event-view'
+  });
 
-    document.body.appendChild(div);
+  suiteTemplate('modify-event', {
+    id: 'modify-event-view'
+  });
+
+  setup(function(done) {
     app = testSupport.calendar.app();
     realGo = app.go;
 
@@ -316,10 +308,10 @@ suiteGroup('Views.ModifyEvent', function() {
             startDate: busytimeRecurring.startDate,
             endDate: busytimeRecurring.endDate
           };
-          assert.hasProperties(
-            subject.formData(),
-            expected
-          );
+
+          var actual = subject.formData();
+          actual.calendarId = parseInt(actual.calendarId, 10);
+          assert.hasProperties(actual, expected);
         });
       });
     });
@@ -356,6 +348,99 @@ suiteGroup('Views.ModifyEvent', function() {
           assert.equal(subject.event.alarms.length, 2);
         });
       });
+    });
+
+
+    // this allows to test _setupDateTimeSync() - before user changes value
+    test('date/time are displayed according to the locale', function(done) {
+      remote.startDate = new Date(2012, 11, 30, 1, 2);
+      remote.endDate = new Date(2012, 11, 31, 13, 4);
+
+      updatesValues({}, function() {
+        done(function() {
+          var startDateLocale = document.getElementById('start-date-locale');
+          assert.equal(startDateLocale.textContent, '12/30/2012');
+
+          var endDateLocale = document.getElementById('end-date-locale');
+          assert.equal(endDateLocale.textContent, '12/31/2012');
+
+          var startTimeLocale = document.getElementById('start-time-locale');
+          assert.equal(startTimeLocale.textContent, '1:02 AM');
+
+          var endTimeLocale = document.getElementById('end-time-locale');
+          assert.equal(endTimeLocale.textContent, '1:04 PM');
+        });
+      });
+    });
+
+    suite('#_updateDateLocaleOnInput', function() {
+      var clock;
+      var element;
+      var evt;
+
+      setup(function() {
+        element = {};
+        evt = { target: {} };
+      });
+
+      teardown(function() {
+        clock.restore();
+      });
+
+      test('should localize date', function() {
+        var baseTimestamp = (new Date(2014, 0, 20).getTime());
+        clock = sinon.useFakeTimers(baseTimestamp);
+        evt.target.value = '2014-01-21';
+        subject._updateDateLocaleOnInput(element, evt);
+        assert.equal(element.textContent, '01/21/2014');
+      });
+
+      test('display proper month - Bug 966516', function() {
+        // it's really important to mock the Date to be able to reproduce the
+        // Bug 966516, since it only happened if system date was a day higher
+        // than next month end date (eg. Jan 31 and you pick Feb 28)
+        var baseTimestamp = (new Date(2014, 0, 31, 2, 30)).getTime();
+        clock = sinon.useFakeTimers(baseTimestamp);
+        evt.target.value = '2014-02-28';
+        subject._updateDateLocaleOnInput(element, evt);
+        assert.equal(element.textContent, '02/28/2014');
+      });
+    });
+
+    suite('#_updateTimeLocaleOnInput', function() {
+      test('should localize time', function() {
+        var element = {};
+        var evt = { target: { value: '22:31' } };
+        subject._updateTimeLocaleOnInput(element, evt);
+        assert.equal(element.textContent, '10:31 PM');
+      });
+    });
+
+  });
+
+  suite('#_overrideEvent', function(done) {
+    var startDate;
+    var endDate;
+    var search;
+
+    setup(function() {
+      startDate = new Date(1989, 4, 17, 2, 0, 0, 0);
+      endDate = new Date(1989, 4, 17, 3, 0, 0, 0);
+      var queryString = {
+        startDate: startDate.toString(),
+        endDate: endDate.toString()
+      };
+
+      search = '?' + Calendar.QueryString.stringify(queryString);
+      subject.useModel(this.busytime, this.event, done);
+    });
+
+    test('should set startDate and endDate on the event', function() {
+      assert.notEqual(subject.event.startDate.getTime(), startDate.getTime());
+      assert.notEqual(subject.event.endDate.getTime(), endDate.getTime());
+      subject._overrideEvent(search);
+      assert.equal(subject.event.startDate.getTime(), startDate.getTime());
+      assert.equal(subject.event.endDate.getTime(), endDate.getTime());
     });
   });
 
@@ -517,6 +602,21 @@ suiteGroup('Views.ModifyEvent', function() {
       subject.deleteRecord();
     });
 
+    test('with an error', function(done) {
+      var err = new Calendar.Error.Authentication();
+      subject.showErrors = function(givenErr) {
+        done(function() {
+          assert.equal(err, givenErr);
+        });
+      };
+
+      provider.deleteEvent = function(model, callback) {
+        Calendar.nextTick(callback.bind(null, err));
+      };
+
+      subject.deleteRecord();
+    });
+
     test('with valid provider', function(done) {
       provider.deleteEvent = function(toDelete, callback) {
         assert.equal(toDelete._id, event._id, 'deletes event');
@@ -547,7 +647,25 @@ suiteGroup('Views.ModifyEvent', function() {
     });
 
     function haltsOnError(providerMethod) {
-      test('does not save when validator errors occurs', function(done) {
+      test('does not persist record when provider fails', function(done) {
+        var dispatchesError;
+        var err = new Calendar.Error.Authentication();
+        subject.showErrors = function(gotErr) {
+          done(function() {
+            assert.equal(err, gotErr, 'dispatches error');
+          });
+        };
+
+        provider[providerMethod] = function() {
+          var args = Array.slice(arguments);
+          var cb = args.pop();
+          Calendar.nextTick(cb.bind(null, err));
+        };
+
+        subject.primary();
+      });
+
+      test('does not invoke provider when validations fails', function(done) {
         provider[providerMethod] = function() {
           done(new Error('should not persist record.'));
         };
@@ -766,6 +884,7 @@ suiteGroup('Views.ModifyEvent', function() {
 
     test('remove calendar (#_removeCalendarId)', function(done) {
       subject.onremovecalendar = function() {
+        subject.onremovecalendar = null;
         done(function() {
           assert.length(element.children, 2, 'removed one');
 
@@ -776,6 +895,7 @@ suiteGroup('Views.ModifyEvent', function() {
         });
       };
 
+      calendarStore.emit('preRemove', calendars.one._id);
       calendarStore.emit('remove', calendars.one._id);
     });
   });
@@ -784,6 +904,8 @@ suiteGroup('Views.ModifyEvent', function() {
 
     var defaultAllDayAlarm;
     var defaultEventAlarm;
+    var morning = 3600 * 9;
+    var oneHour = 3600;
 
     setup(function(done) {
       var pending = 3;
@@ -901,6 +1023,101 @@ suiteGroup('Views.ModifyEvent', function() {
         done();
       });
     });
+
+    test('populated presaved event with no existing alarms', function(done) {
+      subject.event.alarms = [];
+      subject.isSaved = function() {
+        return true;
+      };
+      subject.updateAlarms(true, function() {
+        var allAlarms = subject.alarmList.querySelectorAll('select');
+        assert.equal(allAlarms.length, 1);
+        assert.equal(allAlarms[0].value, 'none');
+        done();
+      });
+    });
+
+    function testDefaultAlarms(isAllDay, defaultValue, done) {
+      settingStore.getValue('alldayAlarmDefault', function(err, value) {
+        var defaultAlarm = value;
+        var defaultAlarmKey;
+        if (isAllDay === true) {
+          defaultAlarmKey = 'alldayAlarmDefault';
+        } else {
+          defaultAlarmKey = 'standardAlarmDefault';
+        }
+        settingStore.set(defaultAlarmKey, defaultValue, function(err, value) {
+          provider.createEvent = function(event, callback) {
+            var data = subject.formData();
+
+            callback();
+
+            if (defaultValue === 'none') {
+              assert.deepEqual(
+                data.alarms[0].trigger,
+                123,
+                'alarms'
+              );
+            } else {
+              assert.deepEqual(
+                data.alarms[0].trigger,
+                defaultValue,
+                'alarms'
+              );
+            }
+            settingStore.set(defaultAlarmKey, defaultAlarm,
+              function(err, value) {
+                done();
+              }
+            );
+          };
+          var allday = subject.getEl('allday');
+          allday.checked = isAllDay;
+          subject.event.isAllDay = isAllDay;
+          subject.updateAlarms(isAllDay, function() {
+            var allAlarms = subject.alarmList.querySelectorAll('select');
+            var firstSelect = allAlarms[0];
+            assert.ok(firstSelect);
+            if (defaultValue === 'none') {
+              assert.equal(allAlarms.length, 1);
+              var newOption = document.createElement('option');
+              newOption.value = '123';
+              firstSelect.appendChild(newOption);
+              firstSelect.value = '123';
+            } else {
+              assert.equal(allAlarms.length, 2);
+            }
+            subject.primary();
+          });
+        });
+      });
+    }
+
+    test('Bug 898242 - when allday alarm default is none', function(done) {
+      var isAllDay = true;
+      var defaultValue = 'none';
+      testDefaultAlarms(isAllDay, defaultValue, done);
+    });
+
+    test('Bug 898242 - when allday alarm default is not none', function(done) {
+      var isAllDay = true;
+      var defaultValue = morning;
+      testDefaultAlarms(isAllDay, defaultValue, done);
+    });
+
+    test('Bug 898242 - when standard alarm default is none', function(done) {
+      var isAllDay = false;
+      var defaultValue = 'none';
+      testDefaultAlarms(isAllDay, defaultValue, done);
+    });
+
+    test('Bug 898242 - when standard alarm default is not none',
+      function(done) {
+        var isAllDay = false;
+        var defaultValue = oneHour;
+        testDefaultAlarms(isAllDay, defaultValue, done);
+      }
+    );
   });
 
   suite('#returnTo', function() {

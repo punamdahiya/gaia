@@ -17,9 +17,12 @@
     if (!Applications.ready)
       return;
 
+    if (!Applications.getByManifestURL(origin + '/manifest.webapp'))
+      return;
+
     // Check widget is there
     widgetFrame = widgetContainer.querySelector('iframe');
-    if (widgetFrame && !widgetFrame.dataset.killed)
+    if (widgetFrame)
       return;
 
     // Create the widget
@@ -31,7 +34,6 @@
 
     widgetFrame.dataset.frameType = 'widget';
     widgetFrame.dataset.frameOrigin = origin;
-    delete widgetFrame.dataset.killed;
 
     widgetFrame.setAttribute('mozbrowser', true);
     widgetFrame.setAttribute('remote', 'true');
@@ -45,7 +47,8 @@
   }
 
   function _onError(e) {
-    e.target.dataset.killed = true;
+    widgetContainer.removeChild(widgetFrame);
+    widgetFrame = null;
   }
 
   function _attachNetworkEvents() {
@@ -57,7 +60,7 @@
 
   var hashMark = 0;
   var activityCounter = 0;
-  var ACTIVITY_THRESHOLD = 250;
+  var ACTIVITY_THRESHOLD = 75;
   function _onNetworkActivity() {
     activityCounter++;
     if (activityCounter === ACTIVITY_THRESHOLD) {
@@ -90,6 +93,9 @@
   }
 
   function _adjustWidgetPosition() {
+    if (!widgetFrame)
+      return;
+
     // TODO: Remove this when weird bug #809031 (Bugzilla) is solved
     // See cost_control.css as well to remove the last rule
     var offsetY = document.getElementById('notification-bar').clientHeight;

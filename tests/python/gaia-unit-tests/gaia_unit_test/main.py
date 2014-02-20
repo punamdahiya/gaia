@@ -10,6 +10,7 @@ import tempfile
 import tornado.websocket
 import tornado.ioloop
 import tornado.httpserver
+import traceback
 
 import reporters
 
@@ -21,6 +22,7 @@ class TestAgentServer(tornado.websocket.WebSocketHandler):
     pending_envs = []
     passes = 0
     failures = 0
+    current_test = None
 
     def initialize(self, tests=None, runner=None, logger=None):
         self.tests = tests
@@ -36,33 +38,33 @@ class TestAgentServer(tornado.websocket.WebSocketHandler):
         self.run_tests(self.tests)
 
     def run_tests(self, tests):
-        def format(value):
-            if (value[0] != '/'):
-                value = '/' + value
-            return value
+        self.tests = tests
+        self.run_next_test()
 
-        tests = map(format, tests)
-        self.emit('run tests', {'tests': tests})
+    def run_next_test(self):
+        self.current_test = self.tests.pop()
+        self.emit('run tests', {'tests': ["/%s" % self.current_test] })
 
     def on_envs_complete(self):
         exitCode = 0
+        if self.failures or not self.passes:
+            # Magic non-zero value to match the expectations of the mozharness
+            # script.
+            exitCode = 10
 
         for env in self.envs:
-            if (self.envs[env].failures > 0):
-                exitCode = 1
-
             if len(self.envs[env].output):
                 print '\ntest report: (' + env + ')'
                 print '\n'.join(self.envs[env].output)
 
         self.close()
-        self.runner.cleanup()
 
-        self.logger.info('Passed: %d' % self.passes)
-        self.logger.info('Failed: %d' % self.failures)
-        self.logger.info('Todo: 0')
+        self.logger.info('passed: %d' % self.passes)
+        self.logger.info('failed: %d' % self.failures)
+        self.logger.info('todo: 0')
 
-        sys.exit(exitCode)
+        crashed = self.runner.cleanup()
+        sys.exit(1 if crashed else exitCode)
 
     def handle_event(self, event, data):
         if event == 'set test envs':
@@ -94,7 +96,7 @@ class TestAgentServer(tornado.websocket.WebSocketHandler):
             if not (test_env in self.envs):
                 return
 
-            self.envs[test_env].handle_event(test_event, test_data)
+            self.envs[test_env].handle_event(test_event, test_data, self.current_test)
 
             # remove from pending and trigger test complete check.
             if (test_event == 'end'):
@@ -104,12 +106,16 @@ class TestAgentServer(tornado.websocket.WebSocketHandler):
                 self.passes += self.envs[test_env].passes
                 self.failures += self.envs[test_env].failures
 
+                if self.tests:
+                    self.run_next_test()
+
                 # now that envs are totally complete show results.
-                if (len(self.pending_envs) == 0):
+                elif (len(self.pending_envs) == 0):
                     self.on_envs_complete()
 
     def on_close(self):
-        print "Closed down"
+        self.logger.warning("Build shut down unexpectedly")
+        self.runner.cleanup()
         sys.exit(1)
 
     def on_message(self, message):
@@ -120,9 +126,10 @@ class TestAgentServer(tornado.websocket.WebSocketHandler):
 
 class GaiaUnitTestRunner(object):
 
-    def __init__(self, binary=None, profile=None):
+    def __init__(self, binary=None, profile=None, symbols_path=None):
         self.binary = binary
         self.profile = profile
+        self.symbols_path = symbols_path
 
     def run(self):
         self.profile_dir = os.path.join(tempfile.mkdtemp(suffix='.gaiaunittest'),
@@ -132,12 +139,16 @@ class GaiaUnitTestRunner(object):
         self.runner = Runner.create(binary=self.binary,
                                     profile_args={'profile': self.profile_dir},
                                     clean_profile=False,
-                                    cmdargs=['--runapp', 'Test Agent'])
+                                    cmdargs=['--runapp', 'Test Agent'],
+                                    symbols_path=self.symbols_path)
         self.runner.start()
 
     def cleanup(self):
+        print 'checking for crashes'
+        crashed = self.runner.check_for_crashes()
         self.runner.cleanup()
         shutil.rmtree(os.path.dirname(self.profile_dir))
+        return crashed
 
     __del__ = cleanup
 
@@ -152,6 +163,10 @@ def cli():
                       action="store", dest="profile",
                       default=None,
                       help="path to gaia profile directory")
+    parser.add_option("--symbols-path",
+                      action="store", dest="symbols_path",
+                      default=None,
+                      help="path or url to breakpad symbols")
 
     options, tests = parser.parse_args()
 
@@ -160,15 +175,35 @@ def cli():
         parser.exit('--binary and --profile required')
 
     if not tests:
+        # Read in a list of tests to skip from disabled.json, if it exists;
+        # disabled.json should contain filenames with paths relative to the
+        # apps directory, e.g., "wallpaper/test/unit/pick_test.js".
+        disabled = []
+        disabled_file = os.path.join(os.path.dirname(__file__), 'disabled.json')
+        if os.access(disabled_file, os.F_OK):
+            with open(disabled_file, 'r') as f:
+                disabled_contents = f.read()
+                try:
+                    disabled = json.loads(disabled_contents)
+                except:
+                    traceback.print_exc()
+                    print "Error while decoding disabled.json; please make sure this file has valid JSON syntax."
+                    sys.exit(1)
+
         # build a list of tests
         appsdir = os.path.join(os.path.dirname(os.path.abspath(options.profile)), 'apps')
         for root, dirs, files in os.walk(appsdir):
             for file in files:
-                if file[-8:] == '_test.js':
-                    tests.append(os.path.relpath(os.path.join(root, file), appsdir))
+                # only include tests in a 'unit' directory
+                roots = root.split(os.path.sep)
+                if 'unit' in roots:
+                    full_path = os.path.relpath(os.path.join(root, file), appsdir)
+                    if full_path.endswith('_test.js') and full_path not in disabled:
+                        tests.append(full_path)
 
     runner = GaiaUnitTestRunner(binary=options.binary,
-                                profile=options.profile)
+                                profile=options.profile,
+                                symbols_path=options.symbols_path)
     runner.run()
 
     # Lame but necessary hack to prevent tornado's logger from duplicating

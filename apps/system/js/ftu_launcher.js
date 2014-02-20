@@ -17,6 +17,8 @@ var FtuLauncher = {
   /* Store that if FTU is currently running */
   _isRunningFirstTime: false,
 
+  _bypassHomeEvent: false,
+
   isFtuRunning: function fl_isFtuRunning() {
     return this._isRunningFirstTime;
   },
@@ -25,12 +27,21 @@ var FtuLauncher = {
     return this._ftuURL;
   },
 
+  setBypassHome: function fl_setBypassHome(value) {
+    this._bypassHomeEvent = value;
+  },
+
   init: function fl_init() {
+    var self = this;
+
     // We have to block home/holdhome event if FTU is first time running.
     // Note: FTU could be launched from Settings app too.
     // We don't want to block home/holdhome in that case.
     window.addEventListener('home', this);
     window.addEventListener('holdhome', this);
+
+    // for iac connection
+    window.addEventListener('iac-ftucomms', this);
 
     // Listen to appterminated event
     window.addEventListener('appterminated', this);
@@ -41,18 +52,45 @@ var FtuLauncher = {
 
     // Monitor appopen event
     // to unlock lockscreen if we are running FTU at first time
-    window.addEventListener('appopen', this);
+    window.addEventListener('appopened', this);
   },
 
   handleEvent: function fl_init(evt) {
     switch (evt.type) {
-      case 'appopen':
+      case 'appopened':
         if (evt.detail.origin == this._ftuURL && this._isRunningFirstTime) {
-          LockScreen.unlock(true);
+          // FTU starting, letting everyone know
+          var evt = document.createEvent('CustomEvent');
+          evt.initCustomEvent('ftuopen',
+          /* canBubble */ true, /* cancelable */ false, {});
+          window.dispatchEvent(evt);
         }
         break;
 
       case 'home':
+        if (this._isRunningFirstTime) {
+          // Because tiny devices have its own exit button,
+          // this check is for large devices
+          if (!this._bypassHomeEvent) {
+            evt.stopImmediatePropagation();
+          } else {
+            var killEvent = document.createEvent('CustomEvent');
+            killEvent.initCustomEvent('killapp',
+              /* canBubble */ true, /* cancelable */ false, {
+              origin: this._ftuURL
+            });
+            window.dispatchEvent(killEvent);
+          }
+        }
+        break;
+
+      case 'iac-ftucomms':
+        var message = evt.detail;
+        if (message === 'done') {
+          this.setBypassHome(true);
+        }
+        break;
+
       case 'holdhome':
         if (this._isRunningFirstTime) {
           evt.stopImmediatePropagation();

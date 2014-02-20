@@ -44,6 +44,8 @@ var CardsView = (function() {
 
   var windowWidth = window.innerWidth;
 
+  var lastInTimeCapture;
+
   // init events
   var gd = new GestureDetector(cardsView);
   gd.startDetecting();
@@ -88,28 +90,57 @@ var CardsView = (function() {
     return stringHTML;
   }
 
+  function fireCardViewClosed() {
+    setTimeout(function nextTick() {
+      window.dispatchEvent(new CustomEvent('cardviewclosed'));
+    });
+  }
+
   // Build and display the card switcher overlay
   // Note that we rebuild the switcher each time we need it rather
   // than trying to keep it in sync with app launches.  Performance is
   // not an issue here given that the user has to hold the HOME button down
   // for one second before the switcher will appear.
-  function showCardSwitcher() {
+  // The second parameter, inRocketbar, determines how to display the
+  // cardswitcher inside of the rocketbar. Both modes are necessary until
+  // Rocketbar is enabled by default, then this will go away.
+  function showCardSwitcher(inRocketbar) {
+
+    var inTimeCapture = lastInTimeCapture;
+    lastInTimeCapture = false;
+
     if (cardSwitcherIsShown())
       return;
 
     // events to handle
     window.addEventListener('lock', CardsView);
 
+    screenElement.classList.add('cards-view');
+
     // Close utility tray if it is opened.
     UtilityTray.hide(true);
 
     // Apps info from WindowManager
-    displayedApp = WindowManager.getDisplayedApp();
+    displayedApp = AppWindowManager.getDisplayedApp();
     currentDisplayed = 0;
-    runningApps = WindowManager.getRunningApps();
+    runningApps = AppWindowManager.getRunningApps();
+
+    // Return early if inRocketbar and there are no apps besides homescreen
+    if (Object.keys(runningApps).length < 2 && inRocketbar) {
+      // Fire a cardchange event to notify the rocketbar that there are no cards
+      fireCardViewClosed();
+      return;
+    } else if (inRocketbar) {
+      screenElement.classList.add('task-manager');
+      CC_SCALE = 0.6;
+      SC_SCALE = 0.5;
+    } else {
+      CC_SCALE = 0.8;
+      SC_SCALE = 0.6;
+    }
 
     // Switch to homescreen
-    WindowManager.launch(null);
+    AppWindowManager.display(null, null, 'to-cardview');
     cardsViewShown = true;
 
     // If user is not able to sort apps manualy,
@@ -135,7 +166,6 @@ var CardsView = (function() {
       // First add an item to the cardsList for each running app
       for (var origin in runningApps) {
         addCard(origin, runningApps[origin], function showCards() {
-          screenElement.classList.add('cards-view');
           cardsView.classList.add('active');
         });
       }
@@ -171,14 +201,25 @@ var CardsView = (function() {
       cardsView.addEventListener('mousedown', CardsView);
     }
 
-    // Make sure we're in portrait mode
-    screen.mozLockOrientation('portrait-primary');
+    // If there is no running app, show "no recent apps" message
+    if (Object.keys(runningApps).length > 1) {
+      cardsView.classList.remove('empty');
+    } else {
+      cardsView.classList.add('empty');
+    }
+
+    // Make sure we're in default orientation
+    screen.mozLockOrientation(OrientationManager.defaultOrientation);
 
     // If there is a displayed app, take keyboard focus away
     if (displayedApp)
       runningApps[displayedApp].frame.blur();
 
     placeCards();
+    // At the beginning only the current card can listen to tap events
+    currentCardStyle.pointerEvents = 'auto';
+    window.addEventListener('tap', CardsView);
+    window.addEventListener('opencurrentcard', CardsView);
 
     function addCard(origin, app, displayedAppCallback) {
       // Display card switcher background first to make user focus on the
@@ -187,7 +228,7 @@ var CardsView = (function() {
         setTimeout(displayedAppCallback);
       }
       // Not showing homescreen
-      if (app.frame.classList.contains('homescreen')) {
+      if (app.isHomescreen) {
         return;
       }
 
@@ -196,6 +237,10 @@ var CardsView = (function() {
       var card = document.createElement('li');
       card.classList.add('card');
       card.dataset.origin = origin;
+
+      var screenshotView = document.createElement('div');
+      screenshotView.classList.add('screenshotView');
+      card.appendChild(screenshotView);
 
       //display app icon on the tab
       if (DISPLAY_APP_ICON) {
@@ -245,6 +290,7 @@ var CardsView = (function() {
         card.classList.add('trustedui');
       } else if (attentionScreenApps.indexOf(origin) == -1) {
         var closeButton = document.createElement('div');
+        closeButton.setAttribute('role', 'button');
         closeButton.classList.add('close-card');
         card.appendChild(closeButton);
       }
@@ -257,71 +303,89 @@ var CardsView = (function() {
 
       card.addEventListener('onviewport', function onviewport() {
         card.style.display = 'block';
-
-        if (card.style.backgroundImage) {
+        if (screenshotView.style.backgroundImage) {
           return;
+        }
+
+        // Handling cards in different orientations
+        var degree = app.rotatingDegree;
+        var isLandscape = false;
+        if (degree == 90 ||
+            degree == 270) {
+          isLandscape = true;
+        }
+        // Rotate screenshotView if needed
+        screenshotView.classList.add('rotate-' + degree);
+        if (isLandscape) {
+          // We must exchange width and height if it's landscape mode
+          var width = card.clientHeight;
+          var height = card.clientWidth;
+          screenshotView.style.width = width + 'px';
+          screenshotView.style.height = height + 'px';
+          screenshotView.style.left = ((height - width) / 2) + 'px';
+          screenshotView.style.top = ((width - height) / 2) + 'px';
         }
 
         // If we have a cached screenshot, use that first
         // We then 'res-in' the correctly sized version
-        var cachedLayer = WindowManager.screenshots[origin];
+        var cachedLayer = app.requestScreenshotURL();
         if (cachedLayer) {
-          card.style.backgroundImage = 'url(' + cachedLayer + ')';
+          screenshotView.style.backgroundImage = 'url(' + cachedLayer + ')';
         }
 
         // And then switch it with screenshots when one will be ready
         // (instead of -moz-element backgrounds)
         // Only take a new screenshot if is the active app
         if (!cachedLayer || (
-          typeof frameForScreenshot.getScreenshot === 'function' &&
-          origin === displayedApp)) {
+          origin === displayedApp && !inTimeCapture)) {
+          if (typeof frameForScreenshot.getScreenshot !== 'function') {
+            return;
+          }
+
           // rect is the final size (considering CSS transform) of the card.
           var rect = card.getBoundingClientRect();
-          frameForScreenshot.getScreenshot(rect.width, rect.height).onsuccess =
+          var width = isLandscape ? rect.height : rect.width;
+          var height = isLandscape ? rect.width : rect.height;
+          frameForScreenshot.getScreenshot(
+            width, height).onsuccess =
             function gotScreenshot(screenshot) {
-              if (screenshot.target.result) {
-                var objectURL = URL.createObjectURL(screenshot.target.result);
+              var blob = screenshot.target.result;
+              if (blob) {
+                var objectURL = URL.createObjectURL(blob);
 
                 // Overwrite the cached image to prevent flickering
-                card.style.backgroundImage =
+                screenshotView.style.backgroundImage =
                   'url(' + objectURL + '), url(' + cachedLayer + ')';
+
+                app.renewCachedScreenshotBlob(blob);
 
                 // setTimeout is needed to ensure that the image is fully drawn
                 // before we remove it. Otherwise the rendering is not smooth.
                 // See: https://bugzilla.mozilla.org/show_bug.cgi?id=844245
                 setTimeout(function() {
-
-                  // Override the cached image
-                  URL.revokeObjectURL(cachedLayer);
-                  WindowManager.screenshots[origin] = objectURL;
+                  URL.revokeObjectURL(objectURL);
                 }, 200);
               }
             };
         }
       });
-
-      // Set up event handling
-      // A click elsewhere in the card switches to that task
-      card.addEventListener('tap', runApp);
     }
   }
 
-  function runApp(e) {
+  function tap(e) {
     // Handle close events
     if (e.target.classList.contains('close-card')) {
       var element = e.target.parentNode;
       cardsList.removeChild(element);
       closeApp(element, true);
-      return;
+    } else if ('origin' in e.target.dataset) {
+      AppWindowManager.display(e.target.dataset.origin, 'from-cardview', null);
     }
-
-    var origin = this.dataset.origin;
-    WindowManager.launch(origin);
   }
 
   function closeApp(element, removeImmediately) {
     // Stop the app itself
-    WindowManager.kill(element.dataset.origin);
+    AppWindowManager.kill(element.dataset.origin);
 
     // Fix for non selectable cards when we remove the last card
     // Described in https://bugzilla.mozilla.org/show_bug.cgi?id=825293
@@ -381,6 +445,8 @@ var CardsView = (function() {
 
     // events to handle
     window.removeEventListener('lock', CardsView);
+    window.removeEventListener('tap', CardsView);
+    window.removeEventListener('opencurrentcard', CardsView);
 
     if (removeImmediately) {
       cardsView.classList.add('no-transition');
@@ -396,6 +462,7 @@ var CardsView = (function() {
       cardsList.innerHTML = '';
       prevCardStyle = currentCardStyle = nextCardStyle = currentCard =
       prevCard = nextCard = deltaX = null;
+      screenElement.classList.remove('task-manager');
     }
     if (removeImmediately) {
       removeCards();
@@ -403,6 +470,8 @@ var CardsView = (function() {
     } else {
       cardsView.addEventListener('transitionend', removeCards);
     }
+
+    fireCardViewClosed();
   }
 
   function cardSwitcherIsShown() {
@@ -492,17 +561,19 @@ var CardsView = (function() {
     // Current card sets the z-index to level 2 and opacity to 1
     currentCardStyle.zIndex = 2;
     currentCardStyle.opacity = 1;
-    currentCardStyle.pointerEvents = 'auto';
 
     // Previous and next cards set the z-indez to level 1 and opacity to 0.4
     prevCardStyle.zIndex = nextCardStyle.zIndex = 1;
     prevCardStyle.opacity = nextCardStyle.opacity = SC_OPA;
   }
 
-  function alignCurrentCard() {
+  function alignCurrentCard(noTransition) {
     // We're going to release memory hiding card out of screen
-    deltaX < 0 ? prevCard.dispatchEvent(outViewPortEvent) :
-                 nextCard.dispatchEvent(outViewPortEvent);
+    if (deltaX < 0) {
+      prevCard && prevCard.dispatchEvent(outViewPortEvent);
+    } else {
+      nextCard && nextCard.dispatchEvent(outViewPortEvent);
+    }
 
     // Disable previous current card
     currentCardStyle.pointerEvents = 'none';
@@ -513,10 +584,19 @@ var CardsView = (function() {
                               currentCardStyle.MozTransition = CARD_TRANSITION;
 
     currentCard.addEventListener('transitionend', function transitionend() {
+      if (!currentCard) {
+        // removeCards method was called immediately without waiting
+        return;
+      }
       currentCard.removeEventListener('transitionend', transitionend);
       prevCardStyle.MozTransition = currentCardStyle.MozTransition =
       nextCardStyle.MozTransition = '';
+      currentCardStyle.pointerEvents = 'auto';
     });
+
+    if (noTransition) {
+      currentCard.dispatchEvent(new Event('transitionend'));
+    }
   }
 
   function moveCards() {
@@ -562,8 +642,10 @@ var CardsView = (function() {
   function onMoveEventForDeleting(evt, deltaY) {
     var dy = deltaY | initialTouchPosition[1] -
                               (evt.touches ? evt.touches[0].pageY : evt.pageY);
-    evt.target.style.MozTransform = 'scale(' + CC_SCALE +
-                                                  ') translateY(-' + dy + 'px)';
+    if (dy > 0) {
+       evt.target.style.MozTransform = 'scale(' + CC_SCALE +
+                                               ') translateY(' + (-dy) + 'px)';
+    }
   }
 
   function onStartEvent(evt) {
@@ -684,7 +766,8 @@ var CardsView = (function() {
         }
         alignCurrentCard();
       } else {
-        alignCurrentCard();
+        alignCurrentCard(true);
+        tap(evt);
       }
 
       return;
@@ -714,11 +797,6 @@ var CardsView = (function() {
             1
           );
         }
-
-        // Without removing the listener before closing card
-        // sometimes the 'click' event fires, even if 'mouseup'
-        // uses stopPropagation()
-        element.removeEventListener('tap', runApp);
 
         // Remove the icon from the task list
         cardsList.removeChild(element);
@@ -798,6 +876,14 @@ var CardsView = (function() {
     },
   false);
 
+  function maybeShowInRocketbar() {
+    if (Rocketbar.enabled) {
+      Rocketbar.render(true);
+    } else {
+      showCardSwitcher();
+    }
+  }
+
   function cv_handleEvent(evt) {
     switch (evt.type) {
       case 'mousedown':
@@ -817,9 +903,20 @@ var CardsView = (function() {
         manualOrderStart(evt);
         break;
 
+      case 'opencurrentcard':
+        AppWindowManager.display(currentCard.dataset.origin,
+          'from-cardview', null);
+        break;
+
+      case 'tap':
+        tap(evt);
+        break;
+
       case 'home':
         if (!cardSwitcherIsShown())
           return;
+
+        window.dispatchEvent(new CustomEvent('cardviewclosedhome'));
 
         evt.stopImmediatePropagation();
         hideCardSwitcher();
@@ -835,12 +932,28 @@ var CardsView = (function() {
         attentionScreenApps = AttentionScreen.getAttentionScreenOrigins();
         break;
 
+      case 'taskmanagershow':
+        showCardSwitcher(true);
+        break;
+
+      case 'taskmanagerhide':
+        hideCardSwitcher();
+        break;
+
       case 'holdhome':
         if (LockScreen.locked)
           return;
 
         SleepMenu.hide();
-        showCardSwitcher();
+        var app = AppWindowManager.getActiveApp();
+        if (!app) {
+          maybeShowInRocketbar();
+        } else {
+          app.getScreenshot(function onGettingRealtimeScreenshot() {
+            lastInTimeCapture = true;
+            maybeShowInRocketbar();
+          });
+        }
         break;
 
       case 'appopen':
@@ -863,6 +976,8 @@ var CardsView = (function() {
 
 window.addEventListener('attentionscreenshow', CardsView);
 window.addEventListener('attentionscreenhide', CardsView);
+window.addEventListener('taskmanagershow', CardsView);
+window.addEventListener('taskmanagerhide', CardsView);
 window.addEventListener('holdhome', CardsView);
 window.addEventListener('home', CardsView);
 window.addEventListener('appopen', CardsView);

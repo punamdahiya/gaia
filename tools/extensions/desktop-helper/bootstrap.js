@@ -2,80 +2,83 @@
 /* vim: set shiftwidth=2 tabstop=2 autoindent cindent expandtab: */
 
 'use strict';
+
 const CC = Components.Constructor;
 const Cc = Components.classes;
 const Ci = Components.interfaces;
 const Cu = Components.utils;
 
+Cu.import('resource://gre/modules/Services.jsm');
+
 function debug(data) {
-  dump('desktop-helper: ' + data + '\n');
+  //dump('desktop-helper: ' + data + '\n');
+}
+
+const kChromeRootPath = 'chrome://desktop-helper.js/content/data/';
+
+// XXX Scripts should be loaded based on the permissions of the apps not
+// based on the domain.
+const kScriptsPerDomain = {
+  '.gaiamobile.org': [
+    'ffos_runtime.js',
+    'lib/bluetooth.js',
+    'lib/cameras.js',
+    'lib/mobile_connection.js',
+    'lib/icc_manager.js',
+    'lib/telephony.js',
+    'lib/wifi.js'
+  ]
+};
+
+function injectMocks() {
+  // Track loading of apps to inject mock APIs
+  Services.obs.addObserver(function(document) {
+    // Some documents like XBL don't have location and should be ignored
+    if (!document.location || !document.defaultView)
+      return;
+    let currentDomain = document.location.toString();
+    let window = document.defaultView;
+
+    // Do not include mocks for unit test sandboxes
+    if (window.wrappedJSObject.mocha &&
+        currentDomain.indexOf('_sandbox.html') !== -1) {
+      return;
+    }
+
+    debug('+++ loading scripts for app: ' + currentDomain + "\n");
+    // Inject mocks based on domain
+    for (let domain in kScriptsPerDomain) {
+      if (currentDomain.indexOf(domain) == -1)
+        continue;
+
+      let includes = kScriptsPerDomain[domain];
+      for (let i = 0; i < includes.length; i++) {
+        debug('loading ' + includes[i] + '...');
+
+        Services.scriptloader.loadSubScript(kChromeRootPath + includes[i],
+                                            window.wrappedJSObject);
+      }
+    }
+  }, 'document-element-inserted', false);
+}
+
+function hotfixAlarms() {
+  // Replace existing alarm service xpcom factory by a new working one,
+  // until a working fallback is implemented in platform code (bug 867868)
+
+  // Sigh. Seems like there is a registration issue between all the addons.
+  // This is dirty but delaying this seems to make it.
+  var timer = Cc['@mozilla.org/timer;1'].createInstance(Ci.nsITimer);
+  timer.initWithCallback(function() {
+    Services.scriptloader.loadSubScript('chrome://desktop-helper.js/content/alarms.js', {});
+  }, 1000, Ci.nsITimer.TYPE_ONE_SHOT);
 }
 
 function startup(data, reason) {
-  Cu.import('resource://gre/modules/Services.jsm');
-  Cu.import('resource://gre/modules/PermissionPromptHelper.jsm');
-  Cu.import('resource://gre/modules/ContactService.jsm');
-  Cu.import('resource:///modules/devtools/gDevTools.jsm');
-
   try {
-    var loader = Cc['@mozilla.org/moz/jssubscript-loader;1']
-                  .getService(Ci.mozIJSSubScriptLoader);
-    loader.loadSubScript('chrome://desktop-helper.js/content/permissions.js');
+    hotfixAlarms();
 
-    // Then inject the missing contents inside apps.
-    var mm = Cc['@mozilla.org/globalmessagemanager;1']
-               .getService(Ci.nsIMessageBroadcaster);
-    mm.loadFrameScript('chrome://desktop-helper.js/content/content.js', true);
-
-    Services.obs.addObserver(function() {
-      let browserWindow = Services.wm.getMostRecentWindow('navigator:browser');
-
-      // Automatically toggle responsive design mode
-      let args = {'width': 320, 'height': 480};
-      let mgr = browserWindow.ResponsiveUI.ResponsiveUIManager;
-      mgr.handleGcliCommand(browserWindow,
-                            browserWindow.gBrowser.selectedTab,
-                            'resize to',
-                            args);
-
-      // And open ff os devtool panel while maximizing its size according to
-      // screen size
-      Services.prefs.setIntPref('devtools.toolbox.sidebar.width',
-                                browserWindow.screen.width - 550);
-      browserWindow.resizeTo(
-        browserWindow.screen.width,
-        browserWindow.outerHeight
-      );
-      gDevToolsBrowser.selectToolCommand(browserWindow.gBrowser,
-                                         'firefox-os-controls');
-
-      try {
-        // Try to load a the keyboard if there is a keyboard addon.
-        Cu.import('resource://keyboard.js/Keyboard.jsm');
-        mm.addMessageListener('Forms:Input', Keyboard);
-        mm.loadFrameScript('chrome://keyboard.js/content/forms.js', true);
-      } catch(e) {
-        debug("Can't load Keyboard.jsm. Likely because the keyboard addon is not here.");
-      }
-    }, 'sessionstore-windows-restored', false);
-
-    // Register a new devtool panel with various OS controls
-    gDevTools.registerTool({
-      id: 'firefox-os-controls',
-      key: 'F',
-      modifiers: 'accel,shift',
-      icon: 'chrome://desktop-helper.js/content/panel/icon.gif',
-      url: 'chrome://desktop-helper.js/content/panel/index.html',
-      label: 'FFOS Control',
-      tooltip: 'Set of controls to tune FirefoxOS apps in Desktop browser',
-      isTargetSupported: function(target) {
-        return target.isLocalTab;
-      },
-      build: function(iframeWindow, toolbox) {
-        iframeWindow.wrappedJSObject.tab = toolbox.target.window;
-      }
-    });
-
+    injectMocks();
   } catch (e) {
     debug('Something went wrong while trying to start desktop-helper: ' + e);
   }

@@ -8,7 +8,7 @@ function dataLimitConfigurer(guiWidget, settings, viewManager) {
   var dataLimitInput = dialog.querySelector('input');
   var format = function ccal_formatterDataUnit(value) {
     var unit = settings.option('dataLimitUnit');
-    return formatData([value, unit]);
+    return formatData([value, _(unit)]);
   };
 
   // Configure dialog
@@ -36,21 +36,24 @@ function dataLimitConfigurer(guiWidget, settings, viewManager) {
     );
   }
 
-  // Disable OK button when empty dataLimitInput
+  // Disable OK button when dataLimitInput not matches any positive real number
+  // (up to three digits length), with optional decimal point, accepting up
+  // to 2 decimal places.
   dataLimitInput.addEventListener('input',
     function cc_ondataLimitInputChange(evt) {
-      okButton.disabled = (evt.target.value.trim() === '');
+      var limitRegexp = new RegExp('^[0-9]{1,3}(\\.[0-9]{1,2})?$');
+      okButton.disabled = (!limitRegexp.test(evt.target.value.trim()));
     }
   );
 
   // Configure the swicth unit button
   var currentUnit = settings.option('dataLimitUnit');
   var switchUnitButton = dialog.querySelector('.switch-unit-button');
-  switchUnitButton.querySelector('span.tag').textContent = currentUnit;
+  switchUnitButton.querySelector('span.tag').textContent = _(currentUnit);
   switchUnitButton.addEventListener('click',
     function ccapp_switchUnit() {
       currentUnit = (currentUnit === 'MB') ? 'GB' : 'MB';
-      switchUnitButton.querySelector('span.tag').textContent = currentUnit;
+      switchUnitButton.querySelector('span.tag').textContent = _(currentUnit);
     }
   );
 
@@ -89,7 +92,7 @@ function dataLimitConfigurer(guiWidget, settings, viewManager) {
       }
 
       // Set dialog
-      switchUnitButton.querySelector('span.tag').textContent = value;
+      switchUnitButton.querySelector('span.tag').textContent = _(value);
 
       var tagSpan = guiWidget.querySelector('.tag');
       tagSpan.textContent = format(dataLimitInput.value);
@@ -104,7 +107,7 @@ function dataLimitConfigurer(guiWidget, settings, viewManager) {
     dataLimitInput.setSelectionRange(dataLimitInput.value.length,
                                      dataLimitInput.value.length);
     oldUnitValue = settings.option('dataLimitUnit');
-    switchUnitButton.querySelector('span.tag').textContent = oldUnitValue;
+    switchUnitButton.querySelector('span.tag').textContent = _(oldUnitValue);
   });
 
 }

@@ -151,6 +151,10 @@ Calendar.ns('Models').Event = (function() {
     },
 
     set calendarId(value) {
+      if (value && typeof(value) !== 'number') {
+        value = Calendar.probablyParseInt(value);
+      }
+
       this.data.calendarId = value;
     },
 
@@ -197,6 +201,27 @@ Calendar.ns('Models').Event = (function() {
     },
 
     /**
+     * If data doesn't have any errors, the event
+     * takes on the attributes of data.
+     *
+     * @param {Object} data, object that contains
+     *  at least some attributes of the event object.
+     *
+     * @return {Object} errors if validationErrors returns erros,
+     *  true otherwise.
+     */
+    updateAttributes: function(data) {
+      var errors = this.validationErrors(data);
+      if (errors) {
+        return errors;
+      }
+      for (var field in data) {
+        this[field] = data[field];
+      }
+      return true;
+    },
+
+    /**
      * Validates the contents of the model.
      *
      * Output example:
@@ -209,14 +234,17 @@ Calendar.ns('Models').Event = (function() {
      *     //...
      *   ]
      *
+     * @param {Object} data, optional object that contains
+     *  at least some attributes of the event object.
      * @return {Array|False} see above.
      */
-    validationErrors: function() {
-      var end = this.endDate.valueOf();
-      var start = this.startDate.valueOf();
+    validationErrors: function(data) {
+      var obj = data || this;
+      var end = obj.endDate.valueOf();
+      var start = obj.startDate.valueOf();
       var errors = [];
 
-      if (start > end) {
+      if (start >= end) {
         errors.push({
           name: 'start-after-end'
         });

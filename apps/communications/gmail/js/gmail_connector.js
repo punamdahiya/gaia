@@ -1,3 +1,7 @@
+/* globals Rest */
+
+/* exported GmailConnector */
+
 'use strict';
 
 /*
@@ -46,7 +50,7 @@ var GmailConnector = (function GmailConnector() {
   // Returns the object used to build the headers necesary by the service
   var buildRequestHeaders = function buildRequestHeaders(access_token) {
     var requestHeaders = EXTRA_HEADERS;
-    requestHeaders['Authorization'] = 'OAuth ' + access_token;
+    requestHeaders.Authorization = 'OAuth ' + access_token;
 
     return requestHeaders;
   };
@@ -194,10 +198,6 @@ var GmailConnector = (function GmailConnector() {
 
     output.uid = contact.uid;
 
-    if (contact.givenName) {
-      output.givenName = contact.givenName;
-    }
-
     if (contact.familyName) {
       output.familyName = contact.familyName;
     }
@@ -205,6 +205,12 @@ var GmailConnector = (function GmailConnector() {
     if (contact.email && contact.email.length > 0) {
       output.email1 = contact.email[0].value;
     }
+    var tel;
+    if (contact.tel && contact.tel.length > 0) {
+      tel = contact.tel[0].value;
+    }
+    output.givenName = contact.givenName || tel ||
+                                            output.email1 || contact.org || '';
 
     var photoUrl = buildContactPhotoURL(contact, accessToken);
     if (photoUrl) {
@@ -227,7 +233,7 @@ var GmailConnector = (function GmailConnector() {
     // import process, not for the api
     output.uid = getUid(googleContact);
 
-    output.name = getValueForNode(googleContact, 'title');
+    output.name = [getValueForNode(googleContact, 'title')];
 
     // Store the photo url, not in the contact itself
     var photoUrl = googleContact.querySelector('link[type="image/*"]');
@@ -269,7 +275,10 @@ var GmailConnector = (function GmailConnector() {
 
     var bday = googleContact.querySelector('birthday');
     if (bday) {
-      output.bday = new Date(bday.getAttribute('when'));
+      var bdayMS = Date.parse(bday.getAttribute('when'));
+      if (!isNaN(bdayMS)) {
+        output.bday = new Date(bdayMS);
+      }
     }
 
     var content = googleContact.querySelector('content');
@@ -300,7 +309,7 @@ var GmailConnector = (function GmailConnector() {
   // Returns an array with the possible emails found in a contact
   // as a ContactField format
   var parseEmails = function parseEmails(googleContact) {
-    var DEFAULT_EMAIL_TYPE = 'personal';
+    var DEFAULT_EMAIL_TYPE = 'other';
     var emails = [];
     var fields = googleContact.getElementsByTagNameNS(GD_NAMESPACE,
       'email');
@@ -315,7 +324,7 @@ var GmailConnector = (function GmailConnector() {
         }
 
         emails.push({
-          'type': type,
+          'type': [type],
           'value': emailField.getAttribute('address')
         });
       }
@@ -349,7 +358,13 @@ var GmailConnector = (function GmailConnector() {
   // Given a google contact this function returns an array of
   // ContactField with the pones stored for that contact
   var parsePhones = function parsePhones(googleContact) {
-    var DEFAULT_PHONE_TYPE = 'personal';
+    var DEFAULT_PHONE_TYPE = 'other';
+    var GMAIL_MAP = {
+      'work_fax' : 'faxOffice',
+      'home_fax' : 'faxHome',
+      'pager' : 'other',
+      'main' : 'other'
+    };
     var phones = [];
     var fields = googleContact.getElementsByTagNameNS(GD_NAMESPACE,
       'phoneNumber');
@@ -364,7 +379,7 @@ var GmailConnector = (function GmailConnector() {
         }
 
         phones.push({
-          'type': type,
+          'type': [GMAIL_MAP[type] || type],
           'value': field.textContent
         });
       }
@@ -398,7 +413,7 @@ var GmailConnector = (function GmailConnector() {
   // return the google contact id if we find it on
   // the uri, -1 otherwise
   var resolveURI = function resolveURI(uri) {
-    if (uri && uri.indexOf(URN_IDENTIFIER) == 0) {
+    if (uri && uri.indexOf(URN_IDENTIFIER) === 0) {
       var output = uri.substr(URN_IDENTIFIER.length);
       if (output && output.length > 0) {
         return output;
@@ -433,6 +448,10 @@ var GmailConnector = (function GmailConnector() {
     return 'gmail';
   })();
 
+  var getAutomaticLogout = (function getAutomaticLogout() {
+    return true;
+  })();
+
   return {
     'listAllContacts': listAllContacts,
     'listDeviceContacts': listDeviceContacts,
@@ -444,6 +463,7 @@ var GmailConnector = (function GmailConnector() {
     'downloadContactPicture': downloadContactPicture,
     'startSync': startSync,
     'name': getServiceName,
+    'automaticLogout': getAutomaticLogout,
     'gContactToJson': gContactToJson
   };
 

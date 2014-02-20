@@ -6,7 +6,7 @@
   }
   DateTimeFormat.prototype = {
     localeFormat: function mockLocaleFormat(time, strFormat) {
-      return '' + time;
+      return '' + (+time) + strFormat;
     }
   };
 
@@ -16,6 +16,13 @@
         return key + JSON.stringify(params);
       }
       return key;
+    },
+    ready: function ready(handler) {
+      setTimeout(handler);
+    },
+    translate: function translate(element) {},
+    localize: function localize(element, id, args) {
+      element.innerText = MockL10n.get(id, args);
     },
     DateTimeFormat: DateTimeFormat
   };

@@ -137,12 +137,22 @@
  */
 
 (function (root, factory) {
-  if (typeof exports === 'object')
+  // node.js
+  if (typeof exports === 'object') {
     module.exports = factory();
-  else if (typeof define === 'function' && define.amd)
+    this.Blob = require('./blob').Blob;
+    var stringencoding = require('stringencoding');
+    this.TextEncoder = stringencoding.TextEncoder;
+    this.TextDecoder = stringencoding.TextDecoder;
+  }
+  // browser environment, AMD loader
+  else if (typeof define === 'function' && define.amd) {
     define('wbxml',factory);
-  else
+  }
+  // browser environment, no AMD loader
+  else {
     root.WBXML = factory();
+  }
 }(this, function() {
   'use strict';
 
@@ -169,6 +179,10 @@
     EXT_2:       0xC2,
     OPAQUE:      0xC3,
     LITERAL_AC:  0xC4,
+  };
+
+  var EndOfData = {
+    message: 'THIS IS AN INTERNAL CONTROL FLOW HACK THAT YOU SHOULD NOT SEE'
   };
 
   /**
@@ -255,28 +269,33 @@
     codepages.__tagnames__ = {};
     codepages.__attrdata__ = {};
 
-    for (var iter in Iterator(codepages)) {
-      var name = iter[0], page = iter[1];
+    for (var name in codepages) {
+      var page = codepages[name];
       if (name.match(/^__/))
         continue;
 
       if (page.Tags) {
-        var v = Iterator(page.Tags).next();
-        codepages.__nsnames__[v[1] >> 8] = name;
+        // The upper byte(s) correspond to the namespace.
+        var tagName, tagValue;
+        for (tagName in page.Tags) {
+          tagValue = page.Tags[tagName];
+          codepages.__nsnames__[tagValue >> 8] = name;
+          break;
+        }
 
-        for (var iter2 in Iterator(page.Tags)) {
-          var tag = iter2[0], value = iter2[1];
-          codepages.__tagnames__[value] = tag;
+        for (tagName in page.Tags) {
+          tagValue = page.Tags[tagName];
+          codepages.__tagnames__[tagValue] = tagName;
         }
       }
 
       if (page.Attrs) {
-        for (var iter3 in Iterator(page.Attrs)) {
-          var attr = iter3[0], data = iter3[1];
-          if (!('name' in data))
-            data.name = attr;
-          codepages.__attrdata__[data.value] = data;
-          page.Attrs[attr] = data.value;
+        for (var attrName in page.Attrs) {
+          var attrData = page.Attrs[attrName];
+          if (!('name' in attrData))
+            attrData.name = attrName;
+          codepages.__attrdata__[attrData.value] = attrData;
+          page.Attrs[attrName] = attrData.value;
         }
       }
     }
@@ -301,8 +320,9 @@
   // TODO: Really, we should build our own map here with synonyms for the
   // various encodings, but this is a step in the right direction.
   var str2mib = {};
-  for (var iter in Iterator(mib2str)) {
-    str2mib[iter[1]] = iter[0];
+  for (var mibId in mib2str) {
+    var mibStr = mib2str[mibId];
+    str2mib[mibStr] = mibId;
   }
 
   function Element(ownerDocument, type, tag) {
@@ -343,8 +363,8 @@
 
     getAttributes: function() {
       var attributes = [];
-      for (var iter in Iterator(this._attrs)) {
-        var name = iter[0], pieces = iter[1];
+      for (var name in this._attrs) {
+        var pieces = this._attrs[name];
         var data = name.split(':');
         attributes.push({ name: name, namespace: data[0], localName: data[1],
                           value: this._getAttribute(pieces) });
@@ -365,8 +385,8 @@
       var strValue = '';
       var array = [];
 
-      for (var iter in Iterator(pieces)) {
-        var hunk = iter[1];
+      for (var i = 0; i < pieces.length; i++) {
+        var hunk = pieces[i];
         if (hunk instanceof Extension) {
           if (strValue) {
             array.push(strValue);
@@ -484,7 +504,7 @@
   Reader.prototype = {
     _get_uint8: function() {
       if (this._index === this._data.length)
-        throw StopIteration;
+        throw EndOfData;
       return this._data[this._index++];
     },
 
@@ -739,7 +759,7 @@
           }
         }
       } } catch (e) {
-        if (!(e instanceof StopIteration))
+        if (e !== EndOfData)
           throw e;
       }
       return doc;
@@ -809,12 +829,58 @@
     },
   };
 
-  function Writer(version, pid, charset, strings) {
+  /**
+   * @param version {String}
+   *   WBXML version. v1.1 is the most recent W3C spec.  The Open Mobile
+   *   Alliance spec version is v1.3.
+   * @param pid {Number}
+   *   The public identifier.  Popular choices include 0 (it's in the string
+   *   table) and 1 (Unknown/missing).  ActiveSync uses 1.  Check your standard
+   *   for other values.
+   * @param charset {String}
+   *   This must be 'UTF-8', but conceptually it's the string value of an IANA
+   *   allocated MIB enum.  This must be UTF-8 because we use TextEncoder and
+   *   it only likes to encode into UTF-8 and UTF-16 to make the world a better
+   *   place.  We could support UTF-16 if we added a MIB entry, probably.
+   * @param [strings=null] {String[]}
+   *   A list of strings to encode into the string table.  Use `str_t` to
+   *   reference the string table by offset.  You'll want to provide an
+   *   enhancement if you really want to use this functionality because it
+   *   would be horribly painful to use as it exists.
+   * @param [dataType="arraybuffer"] {String}
+   *   The type of output desired from the Writer.  Currently supported values
+   *   are "arraybuffer" (the default) and "blob".  You must use "blob" if you
+   *   want to write Blobs into the output (currently only supported for use
+   *   by opaque()).  If using "arraybuffer", retrieve your output from the
+   *   `buffer` or `bytes` getters.  If using "blob", retrieve it using `blob`.
+   */
+  function Writer(version, pid, charset, strings, dataType) {
+    // When creating a Blob for output, we use our normal _rawbuf/_buffer/_pos
+    // logic until a Blob gets written via opaque().  At that point we wrap the
+    // ArrayBuffer into a Blob, push it into _blobs, and reset the ArrayBuffer
+    // state.
+    if (dataType === 'blob')
+      this._blobs = [];
+    else
+      this._blobs = null;
+    this.dataType = dataType || 'arraybuffer';
     this._rawbuf = new ArrayBuffer(1024);
     this._buffer = new Uint8Array(this._rawbuf);
     this._pos = 0;
     this._codepage = 0;
     this._tagStack = [];
+
+    /**
+     * @private
+     * @property _rootTagValue
+     * @type Number|null
+     *
+     * The tag value of the first tag written to the buffer, or null if no
+     * tag has yet been written.  This is used by jsas's postCommand helper
+     * method to extract the command from an already-written string as a caller
+     * convenience.  It is publicly exposed via the `firstLocalTagName` getter.
+     */
+    this._rootTagValue = null;
 
     var infos = version.split('.').map(function(x) {
       return parseInt(x);
@@ -837,8 +903,8 @@
       var bytes = strings.map(function(s) { return encoder.encode(s); });
       var len = bytes.reduce(function(x, y) { return x + y.length + 1; }, 0);
       this._write_mb_uint32(len);
-      for (var iter in Iterator(bytes)) {
-        var b = iter[1];
+      for (var i = 0; i < bytes.length; i++) {
+        var b = bytes[i];
         this._write_bytes(b);
         this._write(0x00);
       }
@@ -896,7 +962,7 @@
 
   Writer.a = function(name, val) { return new Writer.Attribute(name, val); };
   Writer.str_t = function(index) { return new Writer.StringTableRef(index); };
-  Writer.ent = function(code) { return new Writer.Entity(code) };
+  Writer.ent = function(code) { return new Writer.Entity(code); };
   Writer.ext = function(subtype, index, data) { return new Writer.Extension(
     subtype, index, data); };
 
@@ -962,11 +1028,13 @@
       else {
         this._setCodepage(tag >> 8);
         this._write((tag & 0xff) + flags);
+        if (!this._rootTagValue)
+          this._rootTagValue = tag;
       }
 
       if (attrs.length) {
-        for (var iter in Iterator(attrs)) {
-          var attr = iter[1];
+        for (var i = 0; i < attrs.length; i++) {
+          var attr = attrs[i];
           this._writeAttr(attr);
         }
         this._write(Tokens.END);
@@ -992,8 +1060,8 @@
 
     _writeText: function(value, inAttr) {
       if (Array.isArray(value)) {
-        for (var iter in Iterator(value)) {
-          var piece = iter[1];
+        for (var i = 0; i < value.length; i++) {
+          var piece = value[i];
           this._writeText(piece, inAttr);
         }
       }
@@ -1080,21 +1148,77 @@
       return this.text(Writer.ext(subtype, index, data));
     },
 
+    /**
+     * Write opaque data. (OPAQUE token followed by data).
+     *
+     * @param data {String|TypedArray|Blob}
+     *   You must have specified dataType=blob in the constructor to write a
+     *   Blob.
+     */
     opaque: function(data) {
       this._write(Tokens.OPAQUE);
-      this._write_mb_uint32(data.length);
-      if (typeof data === 'string') {
+      if (data instanceof Blob) {
+        if (!this._blobs)
+          throw new Error('Writer not opened in blob mode');
+        this._write_mb_uint32(data.size);
+        // Because we're forgetting about our typed array and its buffer, we
+        // don't need to snapshot it with a Bool or new ArrayBuffer, etc.
+        this._blobs.push(this.bytes);
+        this._blobs.push(data);
+        // reset out buffer state
+        this._rawbuf = new ArrayBuffer(1024);
+        this._buffer = new Uint8Array(this._rawbuf);
+        this._pos = 0;
+      }
+      else if (typeof data === 'string') {
+        this._write_mb_uint32(data.length);
         this._write_str(data);
       }
-      else {
+      else { // Array or Uint8Array
+        this._write_mb_uint32(data.length);
         for (var i = 0; i < data.length; i++)
           this._write(data[i]);
       }
       return this;
     },
 
+    /**
+     * Returns a fresh ArrayBuffer containing the written data.
+     *
+     * @property buffer
+     * @type ArrayBuffer
+     */
     get buffer() { return this._rawbuf.slice(0, this._pos); },
+    /**
+     * Returns a Uint8Array view on the backing raw buffer.  The backing
+     * ArrayBuffer will very likely be larger than the returned array, so be
+     * careful about making assumptions about the backing buffer.
+     *
+     * @property bytes
+     * @type Uint8Array
+     */
     get bytes() { return new Uint8Array(this._rawbuf, 0, this._pos); },
+    get blob() {
+      if (!this._blobs)
+        throw new Error("No blobs!");
+      var useBlobs = this._blobs;
+      // We don't have a concept of finalizing the stream right now, although
+      // it's pretty unlikely anyone would write to us after this given the
+      // semantics of XML documents...
+      if (this._pos)
+        useBlobs = useBlobs.concat([this.bytes]);
+      // Our existing consumers don't care about a mime type right now, but
+      // maybe there should be a way to specify one?
+      var superBlob = new Blob(useBlobs);
+      return superBlob;
+    },
+
+    /**
+     * Return the tag value of the root tag of the WBXML document.
+     */
+    get rootTag() {
+      return this._rootTagValue;
+    },
   };
 
   function EventParser() {
@@ -1126,12 +1250,13 @@
 
       var doc = reader.document;
       var doclen = doc.length;
+      var listeners = this.listeners, iListener, listener;
       for (var iNode = 0; iNode < doclen; iNode++) {
         var node = doc[iNode];
         if (node.type === 'TAG') {
           fullPath.push(node.tag);
-          for (var iter in Iterator(this.listeners)) {
-            var listener = iter[1];
+          for (iListener = 0; iListener < listeners.length; iListener++) {
+            listener = listeners[iListener];
             if (this._pathMatches(fullPath, listener.path)) {
               node.children = [];
               try {
@@ -1149,16 +1274,16 @@
         else if (node.type === 'STAG') {
           fullPath.push(node.tag);
 
-          for (var iter in Iterator(this.listeners)) {
-            var listener = iter[1];
+          for (iListener = 0; iListener < listeners.length; iListener++) {
+            listener = listeners[iListener];
             if (this._pathMatches(fullPath, listener.path)) {
               recording++;
             }
           }
         }
         else if (node.type === 'ETAG') {
-          for (var iter in Iterator(this.listeners)) {
-            var listener = iter[1];
+          for (iListener = 0; iListener < listeners.length; iListener++) {
+            listener = listeners[iListener];
             if (this._pathMatches(fullPath, listener.path)) {
               recording--;
               try {
@@ -2180,6 +2305,52 @@
   if (typeof exports === 'object')
     module.exports = factory();
   else if (typeof define === 'function' && define.amd)
+    define('activesync/codepages/ComposeMail',[], factory);
+  else
+    root.ASCPComposeMail = factory();
+}(this, function() {
+  'use strict';
+
+  return {
+    Tags: {
+      SendMail:        0x1505,
+      SmartForward:    0x1506,
+      SmartReply:      0x1507,
+      SaveInSentItems: 0x1508,
+      ReplaceMime:     0x1509,
+      /* Missing tag value 0x150A */
+      Source:          0x150B,
+      FolderId:        0x150C,
+      ItemId:          0x150D,
+      LongId:          0x150E,
+      InstanceId:      0x150F,
+      Mime:            0x1510,
+      ClientId:        0x1511,
+      Status:          0x1512,
+      AccountId:       0x1513,
+    }
+  };
+}));
+
+/* Copyright 2012 Mozilla Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+(function (root, factory) {
+  if (typeof exports === 'object')
+    module.exports = factory();
+  else if (typeof define === 'function' && define.amd)
     define('activesync/codepages/Email2',[], factory);
   else
     root.ASCPEmail2 = factory();
@@ -2570,7 +2741,9 @@
     };
 
     xhr.ontimeout = xhr.onerror = function() {
-      aCallback(new Error('Error getting Autodiscover URL'));
+      // Something bad happened in the network layer, so treat this like an HTTP
+      // error.
+      aCallback(new HttpError('Error getting Autodiscover URL', null));
     };
 
     // TODO: use something like
@@ -2618,6 +2791,38 @@
     this.versions = [];
     this.supportedCommands = [];
     this.currentVersion = null;
+
+    /**
+     * Debug support function that is called every time an XHR call completes.
+     * This is intended to be used for logging.
+     *
+     * The arguments to the function are:
+     *
+     * - type: 'options' if caused by a call to getOptions.  'post' if caused by
+     *   a call to postCommand/postData.
+     *
+     * - special: 'timeout' if a timeout error occurred, 'redirect' if the
+     *   status code was 451 and the call is being reissued, 'error' if some
+     *   type of error occurred, or 'ok' on success.  Check xhr.status for the
+     *   specific http status code.
+     *
+     * - xhr: The XMLHttpRequest used.  Use this to check the statusCode,
+     *   statusText, or response headers.
+     *
+     * - params: The object dictionary of parameters encoded into the URL.
+     *   Always present if type is 'post', not present for 'options'.
+     *
+     * - extraHeaders: Optional dictionary of extra request headers that were
+     *   provided.  These will not include the always-present request headers of
+     *   MS-ASProtocolVersion and Content-Type.
+     *
+     * - sent data: If type is 'post', the ArrayBuffer provided to xhr.send().
+     *
+     * - response: In the case of a successful 'post', the WBXML Reader instance
+     *   that will be passed to the callback for the method.  If you use the
+     *   reader, you are responsible for calling rewind() on it.
+     */
+    this.onmessage = null;
   }
   exports.Connection = Connection;
   Connection.prototype = {
@@ -2649,12 +2854,20 @@
     /*
      * Initialize the connection with a server and account credentials.
      *
-     * @param aServer the ActiveSync server to connect to
+     * @param aURL the ActiveSync URL to connect to
      * @param aUsername the account's username
      * @param aPassword the account's password
      */
-    open: function(aServer, aUsername, aPassword) {
-      this.baseUrl = aServer + '/Microsoft-Server-ActiveSync';
+    open: function(aURL, aUsername, aPassword) {
+      // XXX: We add the default service path to the URL if it's not already
+      // there. This is a hack to work around the failings of Hotmail (and
+      // possibly other servers), which doesn't provide the service path in its
+      // URL. If it turns out this causes issues with other domains, remove it.
+      var servicePath = '/Microsoft-Server-ActiveSync';
+      this.baseUrl = aURL;
+      if (!this.baseUrl.endsWith(servicePath))
+        this.baseUrl += servicePath;
+
       this._username = aUsername;
       this._password = aPassword;
     },
@@ -2757,21 +2970,31 @@
         if (xhr.status < 200 || xhr.status >= 300) {
           console.error('ActiveSync options request failed with response ' +
                         xhr.status);
+          if (conn.onmessage)
+            conn.onmessage('options', 'error', xhr, null, null, null, null);
           aCallback(new HttpError(xhr.statusText, xhr.status));
           return;
         }
 
+        // These headers are comma-separated lists. Sometimes, people like to
+        // put spaces after the commas, so make sure we trim whitespace too.
         var result = {
-          versions: xhr.getResponseHeader('MS-ASProtocolVersions').split(','),
-          commands: xhr.getResponseHeader('MS-ASProtocolCommands').split(','),
+          versions: xhr.getResponseHeader('MS-ASProtocolVersions')
+                       .split(/\s*,\s*/),
+          commands: xhr.getResponseHeader('MS-ASProtocolCommands')
+                       .split(/\s*,\s*/)
         };
 
+        if (conn.onmessage)
+          conn.onmessage('options', 'ok', xhr, null, null, null, result);
         aCallback(null, result);
       };
 
       xhr.ontimeout = xhr.onerror = function() {
         var error = new Error('Error getting OPTIONS URL');
         console.error(error);
+        if (conn.onmessage)
+          conn.onmessage('options', 'timeout', xhr, null, null, null, null);
         aCallback(error);
       };
 
@@ -2809,8 +3032,9 @@
      * Send a WBXML command to the ActiveSync server and listen for the
      * response.
      *
-     * @param aCommand the WBXML representing the command or a string/tag
-     *        representing the command type for empty commands
+     * @param aCommand {WBXML.Writer|String|Number}
+     *   The WBXML representing the command or a string/tag representing the
+     *   command type for empty commands
      * @param aCallback a callback to call when the server has responded; takes
      *        two arguments: an error status (if any) and the response as a
      *        WBXML reader. If the server returned an empty response, the
@@ -2832,11 +3056,13 @@
         this.postData(aCommand, contentType, null, aCallback, aExtraParams,
                       aExtraHeaders);
       }
+      // WBXML.Writer
       else {
-        var r = new WBXML.Reader(aCommand, ASCP);
-        var commandName = r.document[0].localTagName;
-        this.postData(commandName, contentType, aCommand.buffer, aCallback,
-                      aExtraParams, aExtraHeaders, aProgressCallback);
+        var commandName = ASCP.__tagnames__[aCommand.rootTag];
+        this.postData(
+          commandName, contentType,
+          aCommand.dataType === 'blob' ? aCommand.blob : aCommand.buffer,
+          aCallback, aExtraParams, aExtraHeaders, aProgressCallback);
       }
     },
 
@@ -2845,7 +3071,7 @@
      *
      * @param aCommand a string (or WBXML tag) representing the command type
      * @param aContentType the content type of the post data
-     * @param aData the data to be posted
+     * @param aData {ArrayBuffer|Blob} the data to be posted
      * @param aCallback a callback to call when the server has responded; takes
      *        two arguments: an error status (if any) and the response as a
      *        WBXML reader. If the server returned an empty response, the
@@ -2876,7 +3102,7 @@
       // Build the URL parameters.
       var params = [
         ['Cmd', aCommand],
-        ['User', this._email],
+        ['User', this._username],
         ['DeviceId', this._deviceId],
         ['DeviceType', this._deviceType]
       ];
@@ -2927,6 +3153,9 @@
         // <http://msdn.microsoft.com/en-us/library/gg651019.aspx>
         if (xhr.status === 451) {
           conn.baseUrl = xhr.getResponseHeader('X-MS-Location');
+          if (conn.onmessage)
+            conn.onmessage(aCommand, 'redirect', xhr, params, aExtraHeaders,
+                           aData, null);
           conn.postData.apply(conn, parentArgs);
           return;
         }
@@ -2934,6 +3163,9 @@
         if (xhr.status < 200 || xhr.status >= 300) {
           console.error('ActiveSync command ' + aCommand + ' failed with ' +
                         'response ' + xhr.status);
+          if (conn.onmessage)
+            conn.onmessage(aCommand, 'error', xhr, params, aExtraHeaders,
+                           aData, null);
           aCallback(new HttpError(xhr.statusText, xhr.status));
           return;
         }
@@ -2941,12 +3173,18 @@
         var response = null;
         if (xhr.response.byteLength > 0)
           response = new WBXML.Reader(new Uint8Array(xhr.response), ASCP);
+        if (conn.onmessage)
+          conn.onmessage(aCommand, 'ok', xhr, params, aExtraHeaders,
+                         aData, response);
         aCallback(null, response);
       };
 
       xhr.ontimeout = xhr.onerror = function() {
         var error = new Error('Error getting command URL');
         console.error(error);
+        if (conn.onmessage)
+          conn.onmessage(aCommand, 'timeout', xhr, params, aExtraHeaders,
+                         aData, null);
         aCallback(error);
       };
 

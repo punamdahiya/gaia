@@ -5,12 +5,12 @@
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: rgba(0, 0, 0, 0.4);
+  background-color: transparent;
 }
 
 /*
  * spinner animation styles copied from
- * shared/style_unstable/progress_activity.css
+ * shared/style/progress_activity.css
  */
 #spinner {
   position: absolute;
@@ -21,6 +21,7 @@
   background: url(images/spinner.png) no-repeat center center / 100%;
   animation: 0.9s spinner-animation infinite steps(30);
   border: none;
+  z-index: 100;
 }
 
 #spinner-overlay.hidden {

@@ -30,15 +30,20 @@ var MimeMapper = {
     'audio/ogg': 'ogg',
     'audio/webm': 'webm',
     'audio/3gpp': '3gp',
+    'audio/amr': 'amr',
     // Video
     'video/mp4': 'mp4',
     'video/mpeg': 'mpg',
     'video/ogg': 'ogg',
     'video/webm': 'webm',
-    'video/3gpp': '3gp'
+    'video/3gpp': '3gp',
     // Application
     // If we want to support some types, like pdf, just add
     // 'application/pdf': 'pdf'
+    'application/vcard': 'vcf',
+    // Text
+    'text/vcard': 'vcf',
+    'text/x-vcard': 'vcf'
   },
 
   // This list only contains the mimetypes we currently supported
@@ -59,6 +64,7 @@ var MimeMapper = {
     'm4r': 'audio/mp4',
     'aac': 'audio/aac',
     'opus': 'audio/ogg',
+    'amr': 'audio/amr',
     // Video
     'mp4': 'video/mp4',
     'mpeg': 'video/mpeg',
@@ -67,10 +73,16 @@ var MimeMapper = {
     'ogx': 'video/ogg',
     'webm': 'video/webm',
     '3gp': 'video/3gpp',
-    'ogg': 'video/ogg'
+    'ogg': 'video/ogg',
     // Application
     // If we want to support some extensions, like pdf, just add
     // 'pdf': 'application/pdf'
+    // Text
+    'vcf': 'text/vcard'
+  },
+  _parseExtension: function(filename) {
+    var array = filename.split('.');
+    return array.length > 1 ? array.pop() : '';
   },
 
   isSupportedType: function(mimetype) {
@@ -81,11 +93,40 @@ var MimeMapper = {
     return (extension in this._extensionToTypeMap);
   },
 
+  isFilenameMatchesType: function(filename, mimetype) {
+    var extension = this._parseExtension(filename);
+    var guessedType = this.guessTypeFromExtension(extension);
+    return (guessedType == mimetype);
+  },
+
   guessExtensionFromType: function(mimetype) {
     return this._typeToExtensionMap[mimetype];
   },
 
   guessTypeFromExtension: function(extension) {
     return this._extensionToTypeMap[extension];
+  },
+
+  // If mimetype is not in the supported list, we will try to
+  // predict the possible valid mimetype based on extension.
+  guessTypeFromFileProperties: function(filename, mimetype) {
+    var extension = this._parseExtension(filename);
+    var type = this.isSupportedType(mimetype) ?
+      mimetype : this.guessTypeFromExtension(extension);
+    return type || '';
+  },
+
+  // if mimetype is not supported, preserve the original extension
+  // and add the predict result as new extension.
+  // If both filename and mimetype are not supported, return the original
+  // filename.
+  ensureFilenameMatchesType: function(filename, mimetype) {
+    if (!this.isFilenameMatchesType(filename, mimetype)) {
+      var guessedExt = this.guessExtensionFromType(mimetype);
+      if (guessedExt) {
+        filename += '.' + guessedExt;
+      }
+    }
+    return filename;
   }
 };

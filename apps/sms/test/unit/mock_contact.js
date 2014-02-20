@@ -3,7 +3,7 @@
 
 function MockContact(name) {
   name = typeof name !== 'undefined' ? name : {
-    familyName: ['Grillo'],
+    familyName: ['O\'Hare'],
     givenName: ['Pepito']
   };
   if (!(this instanceof MockContact)) {
@@ -20,18 +20,28 @@ function MockContact(name) {
   this.tel = [
     {
       'value': '+346578888888',
-      'type': 'Mobile',
+      'type': ['Mobile'],
       'carrier': 'TEF'
     },
     {
       'value': '+12125559999',
-      'type': 'Batphone',
+      'type': 'Batphone', // Make sure we cover both strings and arrays
       'carrier': 'XXX'
+    }
+  ];
+
+  this.email = [
+    {
+      'value': 'a@b.com'
     }
   ];
 
   this.category = [
     'favorite'
+  ];
+
+  this.org = [
+    ''
   ];
 }
 

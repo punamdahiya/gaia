@@ -12,7 +12,6 @@ suite('store/alarm', function() {
 
 
   setup(function(done) {
-    this.timeout(5000);
     app = testSupport.calendar.app();
     db = app.db;
     controller = app.alarmController;
@@ -277,9 +276,12 @@ suite('store/alarm', function() {
       add(new Date(2018, 0, 3), 3);
 
       setup(function(done) {
-        getAllResults.push(Factory('alarm', {
-          trigger: new Date()
-        }));
+        getAllResults.push({
+          data: Factory('alarm', {
+            trigger: new Date(),
+            eventId: 'xx'
+          })
+        });
 
         subject.workQueue(now, done);
       });
@@ -287,6 +289,27 @@ suite('store/alarm', function() {
       test('after', function() {
         assert.length(added, 0);
       });
+    });
+
+    suite('unrelated alarm in db', function() {
+      add(new Date(2018, 0, 3), 3);
+
+      setup(function(done) {
+        getAllResults.push({
+          data: { _randomField: true }
+        });
+        subject.workQueue(now, done);
+      });
+
+      test('after complete', function() {
+        assert.length(added, 1);
+
+        assert.deepEqual(
+          added[0][0],
+          new Date(2018, 0, 3)
+        );
+      });
+
     });
 
     suite('no alarm in db and no alarm within 48 hours', function() {

@@ -1,15 +1,135 @@
 # -*- coding: utf-8 -*-
+"""
 
-from optparse import OptionParser 
+This script reads a XML-formatted word list and produces a dictionary
+file used by the FirefoxOS virtual keyboard for word suggestions and
+auto corrections.
+
+The word lists come from the Android source: https://android.googlesource.com/platform/packages/inputmethods/LatinIME/+/master/dictionaries/
+
+This script currently depends on the XML format of the Android
+wordlists. (Eventually we might want to pre-process the XML files
+to a plain text format and simplify this script so that it will work
+with any plain-text word and frequency list)
+
+The sample.xml file from the Android repo looks like this:
+
+----------------------------------------------------------------------
+
+    <!-- This is a sample wordlist that can be converted to a binary
+         dictionary for use by the Latin IME. The format of the word
+         list is a flat list of word entries. Each entry has a frequency
+         between 255 and 0. Highest frequency words get more weight in
+         the prediction algorithm. As a special case, a weight of 0 is
+         taken to mean profanity - words that should not be considered a
+         typo, but that should never be suggested explicitly. You can
+         capitalize words that must always be capitalized, such as
+         "January". You can have a capitalized and a non-capitalized
+         word as separate entries, such as "robin" and "Robin". -->
+
+    <wordlist>
+      <w f="255">this</w>
+      <w f="255">is</w>
+      <w f="128">sample</w>
+      <w f="1">wordlist</w>
+    </wordlist>
+----------------------------------------------------------------------
+
+This script processes the word list and converts it to a Ternary
+Search Tree (TST), as described in
+gaia/apps/keyboard/js/imes/latin/predictions.js and also in
+
+  http://en.wikipedia.org/wiki/Ternary_search_tree
+  http://www.strchr.com/ternary_dags
+  http://www.strchr.com/dawg_predictive
+
+Note that the script does not convert the tree into a DAG (by sharing
+common word suffixes) because it cannot maintain separate frequency
+data for each word if the words share nodes.
+
+This script balances the TST such that at any node the
+highest-frequency word is found by following the center pointer. The
+script also overlays a linked list on top of the tree. At any node,
+the next most frequent word with the same parent node is found by
+following the next pointer.
+
+After building the TST data strucure this script serializes it into a
+compact binary file with variable length nodes. The file begins with
+the 8 ASCII characters "FxOSDICT" and four more bytes. Bytes 8, 9 and
+10 are currently unused and byte 11 is a dictionary format version
+number, currently 1.
+
+Byte 12 file specifies the length of the longest word in the
+dictionary.
+
+After these first 13 bytes, the file contains a character table that
+lists the characters used in the dictionary. This table is a two-byte
+big-endian integer that specifies the number of entries in the
+table. Each table entry is a big-endian two-byte character code
+followed by a big-endian 4-byte number that specifies the number of
+times the character appears in the dictionary.
+
+After the character table (starting at byte 15 + num_entries*6), the
+file consists of serialized nodes. Each node is betwen 1 byte and 6
+bytes long, encoded as follows.
+
+The first byte of each node is always an 8-bit bitfield: csnfffff
+
+The c bit specifies whether this node represents a character. If c is
+1 then a character code follows this first byte. If c is 0 then this
+is a terminal node that marks the end of the word and it consists
+of this single byte by itself.
+
+The s bit specifies the size of the character associated with this
+node. If s is 0 the character is one byte long. If s is 1 the
+character is a big-endian two byte value.
+
+The n bit specifies whether this node includes a next pointer. If n is 1 then
+the character code is followed by a big-endian 3 byte number.
+
+The fffff bits are represent a number between 0 and 31 and provide a
+weight for the node. This is usually based on the word frequency data
+from the dictionary, though this may be tuned by adjusting frequency
+depending on word length, for example. At any node, these frequency
+bits represent the weight of the highest frequency word under the
+node. (And, as described in the predictions.js file, the tree is
+balanced so that that highest frequency word is found by following the
+chain of center pointers.)
+
+If the c bit is set, the next one or two bytes (depending on the
+s bit) of the node are the Unicode character code that is stored in
+the node. Two-byte codes are big-endian.
+
+If the n bit was set, the next 3 bytes are a big-endian 24-bit
+unsigned integer offset to the start of the node pointed to by the
+next pointer.
+
+If the c bit was set the node has a character, and this means that it
+also has a center pointer. We serialize the tree so that a node's
+center pointer always points to the next node sequentially. So we
+never need to write the center pointer to the file: it is always the
+next node.
+
+"""
+
+from optparse import OptionParser
 from xml.parsers import expat
 import struct
+import math
 
 _NodeCounter = 0
 _NodeRemoveCounter = 0
 _NodeVisitCounter = 0
 _EmitCounter = 0
+_WordCounter = 0
 
-_EndOfWord = '$'
+_EndOfWord = chr(0)
+
+# How many times do we use each character in this language
+characterFrequency = {}
+maxWordLength = 0
+highestFreq = 0
+
 
 _DiacriticIndex = {
     'a': 'ÁáĂăǍǎÂâÄäȦȧẠạȀȁÀàẢảȂȃĀāĄąÅåḀḁȺⱥÃãǼǽǢǣÆæ',
@@ -55,13 +175,9 @@ class TSTNode:
         _NodeCounter += 1
         self.ch = ch
         self.left = self.center = self.right = None
-        self.frequency = 0 # averaged maximum frequency
+        self.frequency = 0 # maximum frequency
         # store the count for balancing the tst
         self.count = 0
-        # store the number of tree nodes compressed into one DAG node
-        self.ncompressed = 1
-        # store hash for creating the DAG
-        self.hash = 0
 
 class TSTTree:
     # Constructor for creating a TST Tree
@@ -131,49 +247,60 @@ class TSTTree:
     def balanceLevel(self, node):
         if not node:
             return node
-         
+
         # make center node the root
         node = self.divide(node, node.count // 2)
         # balance subtrees recursively
         node.left = self.balanceLevel(node.left)
         node.right = self.balanceLevel(node.right)
-        
+
         node.center = self.balanceTree(node.center)
         return node
-    
+
     def normalizeChar(self, ch):
         ch = ch.lower()
         if ch in _Diacritics:
             ch = _Diacritics[ch]
         return ch
-    
+
     def collectLevel(self, level, node):
         if not node:
             return
-        level.setdefault(self.normalizeChar(node.ch), []).append(node)
+        # I'm not convinced we need to do this.
+        # And I can't understand the part of the search algorithm
+        # that uses this, so commenting it out for now
+        # level.setdefault(self.normalizeChar(node.ch), []).append(node)
+        level.append(node)
         self.collectLevel(level, node.left)
         self.collectLevel(level, node.right)
-    
+
     def sortLevelByFreq(self, node):
-        # Collect nodes on the same level (lowercase/uppercase/accented characters are grouped together)
-        level = {}
-        self.collectLevel(level, node)
-        level = list(level.values())
-        
-        # Sort by frequency joining nodes with lowercase/uppercase/accented versions of the same character
-        level.sort(key = lambda items: max(items, key = lambda node: node.frequency).frequency, reverse = True)
+        # Collect nodes on the same level
         nodes = []
-        for items in level:
-            nodes += items
-        
-        # Add nextFreq/prevFreq pointers to each node
-        prevFreq = None
+        self.collectLevel(nodes, node)
+
+        # See the comment in collectLevel
+        # # Sort each array within the level
+        # for items in level:
+        #     if (len(items) > 1):
+        #         items.sort(key = lambda node: node.ch)
+        #         items.sort(key = lambda node: node.frequency, reverse = True)
+
+        # Sort by frequency joining nodes with lowercase/uppercase/accented versions of the same character
+        nodes.sort(key = lambda node: node.ch)
+        nodes.sort(key = lambda node: node.frequency, reverse = True)
+        # nodes = []
+        # for items in level:
+        #     nodes += items
+
+        # Add next/prev pointers to each node
+        prev = None
         for i in range(len(nodes)):
-            nodes[i].nextFreq = nodes[i + 1] if i < len(nodes) - 1 else None
-            nodes[i].prevFreq = prevFreq
-            prevFreq = nodes[i]
+            nodes[i].next = nodes[i + 1] if i < len(nodes) - 1 else None
+            nodes[i].prev = prev
+            prev = nodes[i]
         return nodes[0]
-    
+
     # find node in the subtree of root and promote it to root
     def promoteNodeToRoot(self, root, node):
         if node.ch < root.ch:
@@ -189,11 +316,11 @@ class TSTTree:
     def balanceTree(self, node):
         if not node:
             return
-        
+
         # promote to root the letter with the highest maximum frequency
         # of a suffix starting with this letter
         node = self.promoteNodeToRoot(node, self.sortLevelByFreq(node))
-        
+
         # balance other letters on this level of the tree
         node.left = self.balanceLevel(node.left)
         node.right = self.balanceLevel(node.right)
@@ -204,274 +331,112 @@ class TSTTree:
         self.setCount(root)
         root = self.balanceTree(root)
         return root
-        
 
-    # Compress TST into DAWG
-    
-   
-    # Compare two subtrees. If they are equal, return the mapping from the nodes
-    # in nodeA to the corresponding nodes in nodeB. If they are not equal, return False
-    def equal(self, nodeA, nodeB, mapping):
-        if nodeA == None or nodeB == None:
-            return mapping if nodeA == None and nodeB == None else False
-        # two nodes are equal if their characters and their
-        # children are equal
-        mapping[nodeA] = nodeB
-        return mapping if nodeA.ch == nodeB.ch and \
-               self.equal(nodeA.left,   nodeB.left, mapping) and \
-               self.equal(nodeA.center, nodeB.center, mapping) and \
-               self.equal(nodeA.right,  nodeB.right, mapping) else False
-
-    # Return True if all nextFreq nodes are in the nodeA subtree
-    # at the same positions as in the nodeB subtree
-    def equalNextFreq(self, mapping):
-        for node in mapping:
-            if node.nextFreq == None and mapping[node].nextFreq == None:
-                continue
-            if node.nextFreq not in mapping:
-                return False
-            if mapping[node.nextFreq] != mapping[node].nextFreq:
-                return False
-        return True
-    
-    # find the head of the nextFreq/prevFreq linked list
-    def findListHead(self, node, mapping):
-        while node.prevFreq and node.prevFreq in mapping:
-            node = node.prevFreq
-        return node
-    
-    def calculateHash(self, node):
-        if not node:
-            return 0
-        assert (len(node.ch) == 1)
-        node.hash = (ord(node.ch) - ord('a')) + 31 * self.calculateHash(node.center)
-        node.hash ^= self.calculateHash(node.left)
-        node.hash ^= self.calculateHash(node.right)
-        node.hash ^= (node.hash >> 16)
-        return node.hash
-
-    # find the node in the hash table. if it does not exist,
-    # add a new one, return true and the original node,
-    # if not, return false and the existing node
-    def checkAndRemoveDuplicate(self, node):
-        global _NodeRemoveCounter
-
-        if node.hash in self.table:
-            for candidate in self.table[node.hash]:
-                mapping = self.equal(node, candidate, {})
-                if mapping and self.equalNextFreq(mapping):
-                    # this node already exists in the table.
-                    # remove the duplicate
-                    _NodeRemoveCounter += len(mapping)
-                    head = self.findListHead(node, mapping)
-                    if head.prevFreq:
-                        head.prevFreq.nextFreq = mapping[head]
-                    self.addFreq(candidate, node)
-                    return False, candidate
-        self.table.setdefault(node.hash, []).append(node)
-        return True, node
-        
-    # recursively add frequency
-    def addFreq(self, node, candidate):
-        if not node:
-            return
-        #print(node.frequency, 'add', candidate.frequency, 'in', node.ch)
-        node.frequency += candidate.frequency
-        node.ncompressed += 1
-        self.addFreq(node.left, candidate.left)
-        self.addFreq(node.right, candidate.right)
-        self.addFreq(node.center, candidate.center)
-    
-    # remove duplicates suffixes starting from the longest one
-    def removeDuplicates(self, node):
-        global _NodeVisitCounter
-        _NodeVisitCounter += 1
-        if _NodeVisitCounter % 10000 == 0:
-            print ("          >>> (visiting: " +
-                   str(_NodeVisitCounter) + "/" + str(_NodeCounter) +
-                   ", removed: " + str(_NodeRemoveCounter) + ")")
-
-        if node.left:
-            # if the node already exists in the table
-            # (checkAndRemoveDuplicate returns false),
-            # its children were checked for duplicates already
-            # avoid duplicate checking
-            checkDeeper, node.left = self.checkAndRemoveDuplicate(node.left)
-            if checkDeeper:
-                self.removeDuplicates(node.left)
-        if node.right:
-            checkDeeper, node.right = self.checkAndRemoveDuplicate(node.right)
-            if checkDeeper:
-                self.removeDuplicates(node.right)
-        if node.center:
-            checkDeeper, node.center = self.checkAndRemoveDuplicate(node.center)
-            if checkDeeper:
-                self.removeDuplicates(node.center)
-        return node
-        
-    def averageFrequencies(self):
-        for hash in self.table:
-            for candidate in self.table[hash]:
-                candidate.frequency /= candidate.ncompressed
-        del self.table
-        
-    # For debugging
-    def printNode(self, node, level, path):
-        print(' ' * level, path, node.ch, '(', \
-                node.nextFreq.ch if node.nextFreq else '', ')', id(node), '(', \
-                id(node.nextFreq) if node.nextFreq else 'None', ')', \
-                node.frequency, '^')
-    
-    def printDAG(self, root):
-        stack = []
-        visited = []
-        stack.append((root, 0, ''))
-    
-        while stack:
-            node, level, path = stack.pop()
-            if node in visited:
-                self.printNode(node, level, path)
-                continue
-            visited.append(node)
-    
-            self.printNode(node, level, path)
-
-            if node.right:
-                stack.append((node.right, level + 1, 'R'))
-            if node.left:
-                stack.append((node.left, level + 1, 'L'))
-            if node.center:
-                stack.append((node.center, level + 1, '='))            
-
-    # traverse the tree using DFS to find all possible candidates
-    # starting with the given prefix (for debugging)
-    def predict(self, root, prefix, maxsuggestions):
-        def addNextFreq(node, prefix):
-            nonlocal candidates
-
-            # Insert new node into candidates (sorted by frequency)
-            i = len(candidates) - 1
-            while i >= 0 and node.frequency > candidates[i][0]:
-                i -= 1
-
-            # Don't insert at the end if already have the required number of candidates
-            if i == len(candidates) - 1 and len(candidates) >= maxsuggestions:
-                return
-            
-            candidates.insert(i + 1, (node.frequency, node, prefix))
-            
-        def findPrefix(node, prefix):
-            if not node: # not found
-                return None
-            if len(prefix) == 0:
-                return node
-            if prefix[0] < node.ch:
-                return findPrefix(node.left, prefix)
-            elif prefix[0] > node.ch:
-                return findPrefix(node.right, prefix)
-            else:
-                return findPrefix(node.center, prefix[1:])
-        
-        node = findPrefix(root, prefix)
-        if not node:
-            return []
-        
-        # find the predictions
-        candidates = [(node.frequency, node, prefix)]
-        suggestions = []
-        
-        index = 0
-        while len(candidates) > 0 and len(suggestions) < maxsuggestions:
-            # Find the best candidate
-            node = candidates[0][1]
-            prefix = candidates[0][2]
-            candidates.pop(0)
-            while node.ch != _EndOfWord:
-                if node.nextFreq: # Add the next best suggestion
-                    addNextFreq(node.nextFreq, prefix)
-                prefix += node.ch
-                node = node.center
-            if node.nextFreq: # Add the next best suggestion
-                addNextFreq(node.nextFreq, prefix)
-            suggestions.append(prefix)
-            #print(suggestions, end=' ')
-            #for s in candidates:
-            #    print(s[0], s[2] + ',', end='')
-            #print()
-            index += 1
-        
-        print ("suggestions: " + str(len(suggestions)))
-
-        return suggestions
-
-
-def writeInt16(output, int16):
-    output.write(struct.pack("H", int16))
-
-def emitChild(output, verboseOutput, node, child, letter):
-    offset = child.offset if child else 0
-    writeInt16(output, offset & 0xFFFF)
-    if verboseOutput:
-        verboseOutput.write(", " + letter + ": " + str(offset))
-    return offset >> 16
-
-def emitNodes(output, verboseOutput, nodes):
-    i = 0
-    for node in nodes:
-        writeInt16(output, ord(node.ch) if node.ch != _EndOfWord else 0)
-        if verboseOutput:
-            ch = node.ch if ord(node.ch) < 0x80 else 'U+' + hex(ord(node.ch))
-            verboseOutput.write("["+ str(node.offset) +"] { ch: " + ch)
-        
-        #print("["+ str(node.offset) +"] { ch: " + ch + ' next:' +
-        #        (node.nextFreq.ch if node.nextFreq else ''))
-        highbits = emitChild(output, verboseOutput, node, node.left, 'L')
-        highbits = (highbits << 4) | emitChild(output, verboseOutput, node, node.center, 'C')
-        highbits = (highbits << 4) | emitChild(output, verboseOutput, node, node.right, 'R')
-        highbits = (highbits << 4) | emitChild(output, verboseOutput, node, node.nextFreq, 'N')
-        writeInt16(output, highbits)
-        if verboseOutput:
-            verboseOutput.write(", h: " + str(highbits))
-        writeInt16(output, round(node.frequency))
-        if verboseOutput:
-            verboseOutput.write(", f: " + str(round(node.frequency)))
-            verboseOutput.write("}\n")
-    
-        i += 1
-        if i % 10000 == 0:
-            print("          >>> (emitting " + str(i) + "/" + str(len(nodes)) + ")")
-
-
-# emit the tree BFS
-def sortTST(root):
-    
+# Serialize the tree to an array. Do it depth first, folling the
+# center pointer first because that might give us better locality
+def serializeNode(node, output):
     global _EmitCounter
-    queue = []
-    visited = {}
+
+    output.append(node)
+    node.offset = len(output)
+
+    _EmitCounter += 1
+    if _EmitCounter % 100000 == 0:
+        print("          >>> (serializing " + str(_EmitCounter) + "/" +
+              str(_NodeCounter) + ")")
+
+    if (node.ch == _EndOfWord and node.center):
+        print("nul node with a center!");
+    if (node.ch != _EndOfWord and not node.center):
+        print("char node with no center!");
+
+    # do the center node first so words are close together
+    if node.center:
+        serializeNode(node.center, output)
+    if node.left:
+        serializeNode(node.left, output)
+    if node.right:
+        serializeNode(node.right, output)
+
+def serializeTree(root):
     output = []
-    queue.append(root)
-
-    while queue:
-        node = queue.pop(0)
-        if node in visited:
-            continue
-        visited[node] = True
-        output.append(node)
-        node.offset = len(output)
-
-        _EmitCounter += 1
-        if _EmitCounter % 10000 == 0:
-            print("          >>> (sorting " + str(_EmitCounter) + "/" +
-                  str(_NodeCounter - _NodeRemoveCounter) + ")")
-
-        if node.left:
-            queue.append(node.left)
-        if node.center:
-            queue.append(node.center)
-        if node.right:
-            queue.append(node.right)
-    
+    serializeNode(root, output)
     return output
+
+# Make a pass through the array of nodes and figure out the size and offset
+# of each one.
+def computeOffsets(nodes):
+    offset = 0;
+    for i in range(len(nodes)):
+        node = nodes[i]
+        node.offset = offset;
+
+        if node.ch == _EndOfWord:
+            charlen = 0
+        elif ord(node.ch) <= 255:
+            charlen = 1
+        else:
+            charlen = 2
+
+        nextlen = 3 if node.next else 0
+
+        offset = offset + 1 + charlen + nextlen
+    return offset
+
+def writeUint24(output, x):
+    output.write(struct.pack("B", (x >> 16) & 0xFF))
+    output.write(struct.pack("B", (x >> 8) & 0xFF))
+    output.write(struct.pack("B", x & 0xFF))
+
+def emitNode(output, node):
+    charcode = 0 if node.ch == _EndOfWord else ord(node.ch)
+
+    cbit = 0x80 if charcode != 0 else 0
+    sbit = 0x40 if charcode > 255 else 0
+    nbit = 0x20 if node.next else 0
+
+    if node.frequency == 0:
+      freq = 0 #zero means profanity
+    else:
+      freq = 1 + int(node.frequency * 31) # values > 0 map the range 1 to 31
+
+    firstbyte = cbit | sbit | nbit | (freq & 0x1F)
+    output.write(struct.pack("B", firstbyte))
+
+    if cbit:      # If there is a character for this node
+        if sbit:  # if it is two bytes long
+            output.write(struct.pack("B", charcode >> 8))
+        output.write(struct.pack("B", charcode & 0xFF))
+
+    # Write the next node if we have one
+    if nbit:
+        writeUint24(output, node.next.offset)
+
+def emit(output, nodes):
+    nodeslen = computeOffsets(nodes)
+
+    # 12-byte header with version number
+    output.write(b"FxOSDICT\x00\x00\x00\x01")
+
+    # Output the length of the longest word in the dictionary.
+    # This allows to easily reject input that is longer
+    output.write(struct.pack("B", min(maxWordLength, 255)));
+
+    # Output a table of letter frequencies. The search algorithm may
+    # want to use this to decide which diacritics to try, for example.
+    characters = sorted(list(characterFrequency.items()),
+                        key = lambda item: item[1],
+                        reverse = True)
+    output.write(struct.pack(">H", len(characters)))   # Num items that follow
+    for item in characters:
+        output.write(struct.pack(">H", ord(item[0])))  # 16-bit character code
+        output.write(struct.pack(">I", item[1]))       # 32-bit count
+
+    # Write the nodes of the tree to the file.
+    for i in range(len(nodes)):
+        node = nodes[i]
+        emitNode(output, node)
+
 
 # Parse command line arguments.
 #
@@ -479,7 +444,6 @@ def sortTST(root):
 #
 use = "Usage: %prog [options] dictionary.xml"
 parser = OptionParser(usage = use)
-parser.add_option("-v", "--verbose", dest="verbose", action="store_true", default=False, help="Set mode to verbose.")
 parser.add_option("-o", "--output", dest="output", metavar="FILE", help="write output to FILE")
 options, args = parser.parse_args()
 
@@ -492,19 +456,19 @@ if options.output == None:
     exit(-1)
 
 # print some status statements to the console
-print ("[0/8] Creating dictionary ... (this might take a long time)" )
-print ("[1/8] Reading XML wordlist and creating TST ..." )
-
-_WordCounter = 0
+print ("[0/4] Creating dictionary ... (this might take a long time)" )
+print ("[1/4] Reading XML wordlist and creating TST ..." )
 
 def start_element(name, attrs):
-    global lastName, lastFreq, lastFlags, lastWord
+    global lastName, highestFreq, lastFreq, lastFlags, lastWord
     lastName = name
     lastFlags = ""
     if "flags" in attrs:
         lastFlags = attrs["flags"]
     lastFreq = -1
     if "f" in attrs:
+        if not highestFreq:  # the first word in the file has the highest freq.
+            highestFreq = int(attrs["f"])
         lastFreq = int(attrs["f"])
     if lastName == 'w':
         lastWord = ''
@@ -515,12 +479,30 @@ def char_data(text):
         lastWord += text
 
 def end_element(name):
-    global tstRoot, _WordCounter
-    if name != 'w' or lastName != 'w' or \
-        lastFlags == "abbreviation" or \
-        lastFreq <= 1:
+    if name != 'w' or lastName != 'w':
         return
-    tstRoot = tree.insert(tstRoot, lastWord + _EndOfWord, lastFreq)
+
+    global tstRoot, _WordCounter, lastWord, maxWordLength
+
+    lastWord = lastWord.strip()
+
+    # Find the longest word in the dictionary
+    if len(lastWord) > maxWordLength:
+        maxWordLength = len(lastWord)
+
+    # Scale the frequencies so that they are > 0 and < 1
+    # Later, when serializing the dictionary, we'll scale to fit in 5 bits
+    freq = lastFreq / (highestFreq + 1)
+
+    tstRoot = tree.insert(tstRoot, lastWord + _EndOfWord, freq)
+
+    # keep track of the letter frequencies
+    for ch in lastWord:
+        if ch in characterFrequency:
+            characterFrequency[ch] += 1
+        else:
+            characterFrequency[ch] = 1
+
     _WordCounter += 1
     if _WordCounter % 10000 == 0:
         print("          >>> (" + str(_WordCounter) + " words read)")
@@ -535,48 +517,17 @@ p.CharacterDataHandler = char_data
 p.EndElementHandler = end_element
 p.ParseFile(open(args[0], 'rb'))
 
-print ("[2/8] Balancing Ternary Search Tree ...")
+print ("[2/4] Balancing Ternary Search Tree ...")
 tstRoot = tree.balance(tstRoot)
 
-#tree.printDAG(tstRoot)
+print ("[3/4] Serializing TST ...");
+nodes = serializeTree(tstRoot)
 
-print ("[3/8] Calculating hash for nodes ...")
-tree.calculateHash(tstRoot)
-print ("[4/8] Compressing TST to DAG ... (removing duplicate nodes)")
-tstRoot = tree.removeDuplicates(tstRoot)
-
-print ("[5/8] Average the frequencies")
-tree.averageFrequencies()
-
-print ("[6/8] Sorting TST ... (" +
-       str(_NodeCounter) + " - " + str(_NodeRemoveCounter) + " = " +
-       str(_NodeCounter - _NodeRemoveCounter) + " nodes).")
-
-nodes = sortTST(tstRoot)
-
-#tree.printDAG(tstRoot)
-
-print ("[7/8] Emitting TST ...")
-
-verboseOutput = None
-if options.verbose:
-    verboseOutput = open(options.output + ".tst", "w")
-
+print ("[4/4] Emitting TST ...")
 output = open(options.output, "wb")
-emitNodes(output, verboseOutput, nodes)
+emit(output, nodes)
 output.close()
 
-if verboseOutput:
-    verboseOutput.close()
-
-print ("[8/8] Successfully created Dictionary")
+print ("Successfully created Dictionary")
 
 exit()
-
-# Tests the matching function
-# while True:
-#     prefix = input()
-#     if prefix == '':
-#         break
-#     suggestions = tree.predict(tstRoot, prefix, 10)
-#     print(suggestions)

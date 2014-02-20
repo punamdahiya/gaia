@@ -23,7 +23,12 @@
   transition: none;
 }
 
-#attention-screen.status-mode > iframe {
+#screen.attention.active-statusbar #statusbar {
+  display: none;
+}
+
+#attention-screen.status-mode > iframe,
+#screen.lockscreen-camera > #attention-screen > iframe {
   margin-top: 0;
   height: 100%;
 }

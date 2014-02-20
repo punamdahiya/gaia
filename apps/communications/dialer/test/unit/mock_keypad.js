@@ -1,4 +1,8 @@
+kFontStep = 4;
+
 var MockKeypadManager = {
+  maxFontSize: 12,
+  minFontSize: 8,
   formatPhoneNumber:
     function khm_formatPhoneNumber(ellipsisSide) {
     this.mFormatPhoneNumberCalled = true;
@@ -12,5 +16,15 @@ var MockKeypadManager = {
   mTearDown: function khm_tearDown() {
     this.mFormatPhoneNumberCalled = false;
     this.mUpdateAdditionalContactInfo = false;
+  },
+
+  mOnMakeCall: null,
+  updatePhoneNumber: function khm_updatePhoneNumber(number) {
+    this._phoneNumber = number;
+  },
+  makeCall: function makeCall() {
+    if (this.mOnMakeCall) {
+      this.mOnMakeCall(this._phoneNumber);
+    }
   }
 };

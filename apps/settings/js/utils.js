@@ -4,26 +4,9 @@
 'use strict';
 
 /**
- * Constants
- */
-var DEBUG = false;
-
-/**
- * Debug method
- */
-function debug(msg, optObject) {
-  if (DEBUG) {
-    var output = '[DEBUG # Settings] ' + msg;
-    if (optObject) {
-      output += JSON.stringify(optObject);
-    }
-    console.log(output);
-  }
-}
-
-/**
  * Move settings to foreground
  */
+
 function reopenSettings() {
   navigator.mozApps.getSelf().onsuccess = function getSelfCB(evt) {
     var app = evt.target.result;
@@ -56,56 +39,58 @@ function openLink(url) {
  */
 
 function openDialog(dialogID, onSubmit, onReset) {
-  if ('#' + dialogID == document.location.hash)
+  if ('#' + dialogID == Settings.currentPanel)
     return;
 
-  var origin = document.location.hash;
-  var dialog = document.getElementById(dialogID);
+  var origin = Settings.currentPanel;
 
+  // Load dialog contents and show it.
+  Settings.currentPanel = dialogID;
+
+  var dialog = document.getElementById(dialogID);
   var submit = dialog.querySelector('[type=submit]');
   if (submit) {
     submit.onclick = function onsubmit() {
-      if (onSubmit)
+      if (typeof onSubmit === 'function')
         (onSubmit.bind(dialog))();
-      document.location.hash = origin; // hide dialog box
+      Settings.currentPanel = origin; // hide dialog box
     };
   }
 
   var reset = dialog.querySelector('[type=reset]');
   if (reset) {
     reset.onclick = function onreset() {
-      if (onReset)
+      if (typeof onReset === 'function')
         (onReset.bind(dialog))();
-      document.location.hash = origin; // hide dialog box
+      Settings.currentPanel = origin; // hide dialog box
     };
   }
-
-  document.location.hash = dialogID; // show dialog box
 }
 
 /**
- * Audio Preview
- * First click = play, second click = pause.
+ * JSON loader
  */
 
-function audioPreview(element, type) {
-  var audio = document.querySelector('#sound-selection audio');
-  var source = audio.src;
-  var playing = !audio.paused;
-
-  // Both ringer and notification are using notification channel
-  audio.mozAudioChannelType = 'notification';
-
-  var url = '/shared/resources/media/' + type + '/' +
-            element.querySelector('input').value;
-  audio.src = url;
-  if (source === audio.src && playing) {
-    audio.pause();
-    audio.src = '';
-  } else {
-    audio.play();
-  }
+function loadJSON(href, callback) {
+  if (!callback)
+    return;
+  var xhr = new XMLHttpRequest();
+  xhr.onerror = function() {
+    console.error('Failed to fetch file: ' + href, xhr.statusText);
+  };
+  xhr.onload = function() {
+    callback(xhr.response);
+  };
+  xhr.open('GET', href, true); // async
+  xhr.responseType = 'json';
+  xhr.send();
 }
+
+/**
+ * L10n helper
+ */
+
+var localize = navigator.mozL10n.localize;
 
 /**
  * Helper class for formatting file size strings
@@ -158,24 +143,6 @@ var DeviceStorageHelper = (function DeviceStorageHelper() {
     };
   }
 
-  function getStats(types, callback) {
-    var results = {};
-
-    var current = types.length;
-
-    for (var i = 0; i < types.length; i++) {
-      getStat(types[i], function(totalBytes, freeBytes, type) {
-
-        results[type] = totalBytes;
-        results['free'] = freeBytes;
-        current--;
-        if (current == 0)
-          callback(results);
-
-      });
-    }
-  }
-
   function getFreeSpace(callback) {
     var deviceStorage = navigator.getDeviceStorage('sdcard');
 
@@ -189,343 +156,258 @@ var DeviceStorageHelper = (function DeviceStorageHelper() {
     };
   }
 
+  function showFormatedSize(element, l10nId, size) {
+    if (size === undefined || isNaN(size)) {
+      element.textContent = '';
+      return;
+    }
+
+    // KB - 3 KB (nearest ones), MB, GB - 1.2 MB (nearest tenth)
+    var fixedDigits = (size < 1024 * 1024) ? 0 : 1;
+    var sizeInfo = FileSizeFormatter.getReadableFileSize(size, fixedDigits);
+
+    var _ = navigator.mozL10n.get;
+    element.textContent = _(l10nId, {
+      size: sizeInfo.size,
+      unit: _('byteUnit-' + sizeInfo.unit)
+    });
+  }
+
   return {
     getStat: getStat,
-    getStats: getStats,
-    getFreeSpace: getFreeSpace
+    getFreeSpace: getFreeSpace,
+    showFormatedSize: showFormatedSize
   };
-
 })();
-
-/**
- * This emulates <input type="range"> elements on Gecko until they get
- * supported natively.  To be removed when bug 344618 lands.
- * https://bugzilla.mozilla.org/show_bug.cgi?id=344618
- */
-
-function bug344618_polyfill() {
-  var range = document.createElement('input');
-  range.type = 'range';
-  if (range.type == 'range') {
-    // In some future version of gaia that will only be used with gecko v23+,
-    // we can remove the bug344618_polyfill stuff.
-    console.warn("bug344618 has landed, there's some dead code to remove.");
-    var sel = 'label:not(.without_bug344618_polyfill) > input[type="range"]';
-    var ranges = document.querySelectorAll(sel);
-    for (var i = 0; i < ranges.length; i++) {
-      var label = ranges[i].parentNode;
-      label.classList.add('without_bug344618_polyfill');
-    }
-    return; // <input type="range"> is already supported, early way out.
-  }
-
-  /**
-   * The JS polyfill transforms this:
-   *
-   *   <label>
-   *     <input type="range" value="60" />
-   *   </label>
-   *
-   * into this:
-   *
-   *   <label class="bug344618_polyfill">
-   *     <div>
-   *       <span style="width: 60%"></span>
-   *       <span style="left: 60%"></span>
-   *     </div>
-   *     <input type="range" value="60" />
-   *   </label>
-   *
-   * JavaScript-wise, two main differences between this polyfill and the
-   * standard implementation:
-   *   - the `.type' property equals `text' instead of `range';
-   *   - the value is a string, not a float.
-   */
-
-  var polyfill = function(input) {
-    input.dataset.type = 'range';
-
-    var slider = document.createElement('div');
-    var thumb = document.createElement('span');
-    var fill = document.createElement('span');
-    var label = input.parentNode;
-    slider.appendChild(fill);
-    slider.appendChild(thumb);
-    label.insertBefore(slider, input);
-    label.classList.add('bug344618_polyfill');
-
-    var min = parseFloat(input.min);
-    var max = parseFloat(input.max);
-
-    // move the throbber to the proper position, according to input.value
-    var refresh = function refresh() {
-      var pos = (input.value - min) / (max - min);
-      pos = Math.max(pos, 0);
-      pos = Math.min(pos, 1);
-      fill.style.width = (100 * pos) + '%';
-      thumb.style.left = (100 * pos) + '%';
-    };
-
-    // move the throbber to the proper position, according to mouse events
-    var updatePosition = function updatePosition(event) {
-      var rect = slider.getBoundingClientRect();
-      var pos = (event.clientX - rect.left) / rect.width;
-      pos = Math.max(pos, 0);
-      pos = Math.min(pos, 1);
-      fill.style.width = (100 * pos) + '%';
-      thumb.style.left = (100 * pos) + '%';
-      input.value = min + pos * (max - min);
-    };
-
-    // send a 'change' event
-    var notify = function notify() {
-      var evtObject = document.createEvent('Event');
-      evtObject.initEvent('change', true, false);
-      input.dispatchEvent(evtObject);
-    };
-
-    // user interaction support
-    var isDragging = false;
-    var onDragStart = function onDragStart(event) {
-      updatePosition(event);
-      isDragging = true;
-    };
-    var onDragMove = function onDragMove(event) {
-      if (isDragging) {
-        updatePosition(event);
-      }
-    };
-    var onDragStop = function onDragStop(event) {
-      if (isDragging) {
-        updatePosition(event);
-        notify();
-      }
-      isDragging = false;
-    };
-    var onClick = function onClick(event) {
-      updatePosition(event);
-      notify();
-    };
-    slider.onmousedown = onClick;
-    thumb.onmousedown = onDragStart;
-    label.onmousemove = onDragMove;
-    label.onmouseup = onDragStop;
-
-    // expose the 'refresh' method on <input>
-    // XXX remember to call it after setting input.value manually...
-    input.refresh = refresh;
-  };
-
-  // apply to all input[type="range"] elements
-  var selector = 'label:not(.bug344618_polyfill) > input[type="range"]';
-  var ranges = document.querySelectorAll(selector);
-  for (var i = 0; i < ranges.length; i++) {
-    polyfill(ranges[i]);
-  }
-}
 
 /**
  * Connectivity accessors
  */
-
-// create a fake mozMobileConnection if required (e.g. desktop browser)
 var getMobileConnection = function() {
-  var navigator = window.navigator;
-  if (('mozMobileConnection' in navigator) &&
-      navigator.mozMobileConnection &&
-      navigator.mozMobileConnection.data)
-    return navigator.mozMobileConnection;
+  // XXX: check bug-926169
+  // this is used to keep all tests passing while introducing multi-sim APIs
+  var mobileConnection = navigator.mozMobileConnection ||
+    navigator.mozMobileConnections &&
+      navigator.mozMobileConnections[0];
 
-  var initialized = false;
-  var fakeICCInfo = { shortName: 'Fake Free-Mobile', mcc: 208, mnc: 15 };
-  var fakeNetwork = { shortName: 'Fake Orange F', mcc: 208, mnc: 1 };
-  var fakeVoice = {
-    state: 'notSearching',
-    roaming: true,
-    connected: true,
-    emergencyCallsOnly: false
-  };
-
-  function fakeEventListener(type, callback, bubble) {
-    if (initialized)
-      return;
-
-    // simulates a connection to a data network;
-    setTimeout(function fakeCallback() {
-      initialized = true;
-      callback();
-    }, 5000);
-  }
-
-  return {
-    addEventListener: fakeEventListener,
-    iccInfo: fakeICCInfo,
-    get data() {
-      return initialized ? { network: fakeNetwork } : null;
-    },
-    get voice() {
-      return initialized ? fakeVoice : null;
-    }
-  };
+  if (mobileConnection && mobileConnection.data)
+    return mobileConnection;
 };
 
 var getBluetooth = function() {
-  var navigator = window.navigator;
-  if ('mozBluetooth' in navigator)
-    return navigator.mozBluetooth;
-  return {
-    enabled: false,
-    addEventListener: function(type, callback, bubble) {},
-    onenabled: function(event) {},
-    onadapteradded: function(event) {},
-    ondisabled: function(event) {},
-    getDefaultAdapter: function() {}
-  };
+  return navigator.mozBluetooth;
 };
 
-// create a fake mozWifiManager if required (e.g. desktop browser)
-var getWifiManager = function() {
-  var navigator = window.navigator;
-  if ('mozWifiManager' in navigator)
-    return navigator.mozWifiManager;
+var getNfc = function() {
+  if ('mozNfc' in navigator) {
+    return navigator.mozNfc;
+  }
+  return null;
+};
 
-  /**
-   * fake network list, where each network object looks like:
-   * {
-   *   ssid              : SSID string (human-readable name)
-   *   bssid             : network identifier string
-   *   capabilities      : array of strings (supported authentication methods)
-   *   relSignalStrength : 0-100 signal level (integer)
-   *   connected         : boolean state
-   * }
-   */
+/**
+ * The function returns an object of the supporting state of category of network
+ * types. The categories are 'gsm' and 'cdma'.
+ */
+function getSupportedNetworkInfo(mobileConneciton, callback) {
+  var types = [
+    'wcdma/gsm',
+    'gsm',
+    'wcdma',
+    'wcdma/gsm-auto',
+    'cdma/evdo',
+    'cdma',
+    'evdo',
+    'wcdma/gsm/cdma/evdo'
+  ];
+  if (!mobileConneciton)
+    return;
 
-  var fakeNetworks = {
-    'Mozilla-G': {
-      ssid: 'Mozilla-G',
-      bssid: 'xx:xx:xx:xx:xx:xx',
-      capabilities: ['WPA-EAP'],
-      relSignalStrength: 67,
-      connected: false
-    },
-    'Livebox 6752': {
-      ssid: 'Livebox 6752',
-      bssid: 'xx:xx:xx:xx:xx:xx',
-      capabilities: ['WEP'],
-      relSignalStrength: 32,
-      connected: false
-    },
-    'Mozilla Guest': {
-      ssid: 'Mozilla Guest',
-      bssid: 'xx:xx:xx:xx:xx:xx',
-      capabilities: [],
-      relSignalStrength: 98,
-      connected: false
-    },
-    'Freebox 8953': {
-      ssid: 'Freebox 8953',
-      bssid: 'xx:xx:xx:xx:xx:xx',
-      capabilities: ['WPA2-PSK'],
-      relSignalStrength: 89,
-      connected: false
-    }
+  var _hwSupportedTypes = mobileConneciton.supportedNetworkTypes;
+  if (!_hwSupportedTypes)
+    return;
+
+  var _result = {
+    gsm: _hwSupportedTypes.indexOf('gsm') !== -1,
+    cdma: _hwSupportedTypes.indexOf('cdma') !== -1,
+    wcdma: _hwSupportedTypes.indexOf('wcdma') !== -1,
+    evdo: _hwSupportedTypes.indexOf('evdo') !== -1,
+    networkTypes: null
   };
 
-  function getFakeNetworks() {
-    var request = { result: fakeNetworks };
+  var _networkTypes = [];
+  for (var i = 0; i < types.length; i++) {
+    var type = types[i];
+    var subtypes = type.split('/');
+    var allSubTypesSupported = true;
+    for (var j = 0; j < subtypes.length; j++) {
+      allSubTypesSupported =
+        allSubTypesSupported && _result[subtypes[j].split('-')[0]];
+    }
+    if (allSubTypesSupported)
+      _networkTypes.push(type);
+  }
+  if (_networkTypes.length !== 0) {
+    _result.networkTypes = _networkTypes;
+  }
+  callback(_result);
+}
 
-    setTimeout(function() {
-      if (request.onsuccess) {
-        request.onsuccess();
-      }
-    }, 1000);
+function isIP(address) {
+  return /^\d+\.\d+\.\d+\.\d+$/.test(address);
+}
 
-    return request;
+// Remove additional 0 in front of IP digits.
+// Notice that this is not following standard dot-decimal notation, just for
+// possible error tolarance.
+// (Values starting with 0 stand for octal representation by standard)
+function sanitizeAddress(input) {
+  if (isIP(input)) {
+    return input.replace(/0*(\d+)/g, '$1');
+  } else {
+    return input;
+  }
+}
+
+function getTruncated(oldName, options) {
+
+  // options
+  var maxLine = options.maxLine || 2;
+  var node = options.node;
+  var ellipsisIndex = options.ellipsisIndex || 3;
+  var ellipsisCharacter = options.ellipsisCharacter || '...';
+
+  if (node === null) {
+    return oldName;
   }
 
-  return {
-    // true if the wifi is enabled
-    enabled: false,
-    macAddress: 'xx:xx:xx:xx:xx:xx',
+  // used variables and functions
+  function hitsNewline(oldHeight, newHeight) {
+    return oldHeight !== newHeight;
+  }
 
-    // enables/disables the wifi
-    setEnabled: function fakeSetEnabled(bool) {
-      var self = this;
-      var request = { result: bool };
+  var newName = '';
+  var oldHeight;
+  var newHeight;
+  var baseHeight;
+  var currentLine;
+  var ellipsisAt;
+  var hasNewEllipsisPoint = true;
+  var nameBeforeEllipsis = [];
+  var nameBeforeEllipsisString;
+  var nameAfterEllipsis = oldName.slice(-ellipsisIndex);
+  var realVisibility = node.style.visibility;
+  var realWordBreak = node.style.wordBreak;
 
-      setTimeout(function() {
-        if (request.onsuccess) {
-          request.onsuccess();
-        }
-        if (bool) {
-          self.onenabled();
-        } else {
-          self.ondisabled();
-        }
-      });
+  /*
+   * Hide UI, because we are manipulating DOM
+   */
+  node.style.visibility = 'hidden';
 
-      self.enabled = bool;
-      return request;
-    },
+  /*
+   * Force breaking on boundaries
+   */
+  node.style.wordBreak = 'break-all';
 
-    // returns a list of visible/known networks
-    getNetworks: getFakeNetworks,
-    getKnownNetworks: getFakeNetworks,
+  /*
+   * Get the base height to count the currentLine at first
+   */
+  node.textContent = '.';
+  baseHeight = node.clientHeight;
+  node.textContent = '';
 
-    // selects a network
-    associate: function fakeAssociate(network) {
-      var self = this;
-      var connection = { result: network };
-      var networkEvent = { network: network };
+  var needEllipsis = oldName.split('').some(function(character, index) {
 
-      setTimeout(function fakeConnecting() {
-        self.connection.network = network;
-        self.connection.status = 'connecting';
-        self.onstatuschange(networkEvent);
-      }, 0);
+    nameBeforeEllipsis.push(character);
+    nameBeforeEllipsisString = nameBeforeEllipsis.join('');
 
-      setTimeout(function fakeAssociated() {
-        self.connection.network = network;
-        self.connection.status = 'associated';
-        self.onstatuschange(networkEvent);
-      }, 1000);
+    oldHeight = node.clientHeight;
+    node.textContent = nameBeforeEllipsisString +
+        ellipsisCharacter + nameAfterEllipsis;
+    newHeight = node.clientHeight;
 
-      setTimeout(function fakeConnected() {
-        network.connected = true;
-        self.connected = network;
-        self.connection.network = network;
-        self.connection.status = 'connected';
-        self.onstatuschange(networkEvent);
-      }, 2000);
-
-      return connection;
-    },
-
-    // forgets a network (disconnect)
-    forget: function fakeForget(network) {
-      var self = this;
-      var networkEvent = { network: network };
-
-      setTimeout(function() {
-        network.connected = false;
-        self.connected = null;
-        self.connection.network = null;
-        self.connection.status = 'disconnected';
-        self.onstatuschange(networkEvent);
-      }, 0);
-    },
-
-    // event listeners
-    onenabled: function(event) {},
-    ondisabled: function(event) {},
-    onstatuschange: function(event) {},
-
-    // returns a network object for the currently connected network (if any)
-    connected: null,
-
-    connection: {
-      status: 'disconnected',
-      network: null
+    /*
+     * When index is 0, we have to update currentLine according to
+     * the first assignment (it is possible that at first the currentLine
+     * is not 0 if the width of node is too small)
+     */
+    if (index === 0) {
+      currentLine = Math.floor(newHeight / baseHeight);
     }
-  };
-};
+
+    if (hitsNewline(oldHeight, newHeight) && index !== 0) {
+
+      /*
+       * The reason why we have to check twice is because there is a
+       * situation that truncated string is overflowed but there is
+       * still room for original string.
+       *
+       * In this way, we have to memorize the ellipsis index and
+       * slice `nameBeforeEllipsis` to the index in the end.
+       */
+      var testHeight;
+      node.textContent = nameBeforeEllipsisString;
+      testHeight = node.clientHeight;
+
+      if (hitsNewline(oldHeight, testHeight)) {
+
+        /*
+         * We have to make it true again to keep the ellipsisAt
+         * up to date.
+         */
+        hasNewEllipsisPoint = true;
+        currentLine += 1;
+      } else {
+        /*
+         * This is the situation that we still have room, so we have
+         * to keep the ellipsisAt value for later use.
+         */
+        if (hasNewEllipsisPoint) {
+          ellipsisAt = index;
+          hasNewEllipsisPoint = false;
+        }
+      }
+    }
+
+    if (currentLine > maxLine) {
+      if (index === 0) {
+
+        /*
+         * It means that at first, the whole string is already in
+         * an overflowed situation, you have to avoid this situation.
+         * And we will bypass oldName back to you.
+         *
+         * There are some options for you :
+         *
+         *   1. Check options.ellipsisCharacter
+         *   2. Check options.maxLine
+         *   3. Check node's width (maybe too narrow)
+         */
+        console.log(
+          'Your string is in a overflowed situation, ' +
+          'please check your options');
+      }
+
+      /*
+       * Remove the last character, because it causes the overflow
+       */
+      nameBeforeEllipsis.pop();
+      node.textContent = '';
+      return true;
+    }
+  });
+
+  // restore UI
+  node.style.visibility = realVisibility;
+  node.style.wordBreak = realWordBreak;
+
+  if (!needEllipsis) {
+    newName = oldName;
+  } else {
+    newName += nameBeforeEllipsis.join('').slice(0, ellipsisAt);
+    newName += ellipsisCharacter;
+    newName += nameAfterEllipsis;
+  }
+
+  return newName;
+}

@@ -6,12 +6,17 @@ requireLib('store/account.js');
 
 suite('store/account', function() {
 
+  ['Provider.Local', 'Provider.Caldav'].forEach(function(name) {
+    suiteSetup(function(done) {
+      Calendar.App.loadObject(name, done);
+    });
+  });
+
   var subject;
   var db;
   var app;
 
   setup(function(done) {
-    this.timeout(5000);
     app = testSupport.calendar.app();
     db = app.db;
     subject = db.getStore('Account');
@@ -38,6 +43,93 @@ suite('store/account', function() {
     assert.instanceOf(subject, Calendar.Store.Abstract);
     assert.equal(subject.db, db);
     assert.deepEqual(subject._cached, {});
+  });
+
+  suite('#markWithError', function() {
+    var errEvent;
+    var accounts = testSupport.calendar.dbFixtures(
+      'account',
+      'Account', {
+        one: { _id: 55, providerType: 'Mock' }
+      }
+    );
+
+    var calendars = testSupport.calendar.dbFixtures(
+      'calendar',
+      'Calendar', {
+        one: { _id: 'one', accountId: 55 },
+        two: { _id: 'two', accountId: 55 }
+      }
+    );
+
+    var model;
+    setup(function() {
+      model = accounts.one;
+    });
+
+    suite('marking error', function() {
+      var error;
+      setup(function(done) {
+        error = new Calendar.Error.Authentication();
+        subject.markWithError(model, error, done);
+      });
+
+      function markedWithError(expectedCount) {
+        expectedCount = expectedCount || 1;
+        test('after erorr mark #' + expectedCount, function(done) {
+          subject.get(model._id, function(getErr, result) {
+            done(function() {
+              assert.ok(!getErr, 'is successful');
+              assert.equal(result.error.count, expectedCount, 'has count');
+              assert.equal(
+                result.error.name,
+                error.name,
+                'model is marked with error'
+              );
+
+              assert.instanceOf(
+                result.error.date,
+                Date,
+                'has date of occurrence'
+              );
+            });
+          });
+        });
+      }
+
+      markedWithError(1);
+
+      suite('second mark', function() {
+        setup(function(done) {
+          subject.markWithError(model, error, done);
+        });
+
+        markedWithError(2);
+      });
+    });
+
+    suite('dependant calendars', function() {
+      var err;
+      setup(function(done) {
+        err = new Calendar.Error.Authentication();
+        subject.markWithError(model, err, done);
+      });
+
+      function verifyCalendar(key) {
+        test('ensure calendar is marked: ' + key, function(done) {
+          app.store('Calendar').get(key, function(getErr, result) {
+            done(function() {
+              assert.ok(result, 'has calendar');
+              assert.ok(result.error, 'sets error');
+              assert.equal(result.error.name, err.name, 'sets error');
+            });
+          });
+        });
+      }
+
+      verifyCalendar('one');
+      verifyCalendar('two');
+    });
   });
 
   suite('#availablePresets', function() {
@@ -107,7 +199,7 @@ suite('store/account', function() {
 
     setup(function() {
       error = null;
-      result = null;
+      result = {};
 
       modelParams = Factory.build('account', {
         providerType: 'Caldav'
@@ -123,6 +215,77 @@ suite('store/account', function() {
           }, 0);
         }
       };
+    });
+
+    suite('duplicate account failure', function() {
+      var existingAccount;
+      var existingParams = {
+        providerType: 'Caldav',
+        user: 'foobar',
+        fullUrl: 'http://google.com/foo'
+      };
+
+      function sendsDuplicateError(done) {
+        return function(err, id, model) {
+          done(function() {
+            assert.ok(!id, 'is not persisted');
+            assert.ok(err, 'sends error on duplicate account');
+            assert.equal(err.name, 'account-exist');
+          });
+        };
+      }
+
+      setup(function(done) {
+        existingAccount = Factory('account', existingParams);
+        subject.persist(existingAccount, done);
+      });
+
+
+      test('initial input is duplicate', function(done) {
+        var account = Factory('account', existingParams);
+
+        subject.verifyAndPersist(account, sendsDuplicateError(done));
+      });
+
+      test('input is updated to be duplicate', function(done) {
+        var account = Factory('account', existingParams);
+        account.user = '';
+
+        result = { user: existingParams.user };
+
+        subject.verifyAndPersist(account, sendsDuplicateError(done));
+      });
+
+    });
+
+
+    suite('existing account', function() {
+      // setup an account to modify
+      setup(function(done) {
+        model.error = {};
+        subject.persist(model, done);
+      });
+
+      // bug 870512
+      test('should be able to update', function(done) {
+        result = {};
+        model.password = 'new';
+        subject.verifyAndPersist(model, function(err, data) {
+          if (err) {
+            return done(err);
+          }
+          subject.get(model._id, function(getErr, result) {
+            if (getErr) {
+              return done(err);
+            }
+
+            done(function() {
+              assert.equal(result.password, 'new', 'updates pass');
+              assert.ok(!result.error, 'clears errors');
+            });
+          });
+        });
+      });
     });
 
     // mock out the provider
@@ -146,6 +309,19 @@ suite('store/account', function() {
           assert.equal(data.domain, result.domain);
           assert.equal(data.entrypoint, result.entrypoint);
           assert.equal(data.calendarHome, result.calendarHome);
+        });
+      });
+    });
+
+    test('persist + oauth change', function(done) {
+      model.oauth = { code: 'xxx' };
+      result = Factory('caldav.account', {
+        oauth: { refresh_token: 'xxx' }
+      });
+
+      subject.verifyAndPersist(model, function(err, id, data) {
+        done(function() {
+          assert.equal(data.oauth, result.oauth);
         });
       });
     });
@@ -249,6 +425,45 @@ suite('store/account', function() {
 
   });
 
+  suite('#syncableAccounts', function() {
+    var accounts = testSupport.calendar.dbFixtures(
+      'account',
+      'Account', {
+        nosync: { _id: 55, providerType: 'Local' },
+        sync: { _id: 56, providerType: 'Caldav' }
+      }
+    );
+
+
+    var results;
+    setup(function(done) {
+      subject.syncableAccounts(function(err, list) {
+        if (err) return done(err);
+        results = list;
+        done();
+      });
+    });
+
+    test('found accounts', function() {
+      assert.length(results, 1);
+      assert.equal(results[0]._id, accounts.sync._id);
+    });
+
+    suite('no syncable accounts', function() {
+      setup(function(done) {
+        subject.remove(accounts.sync._id, done);
+      });
+
+      test('result', function(done) {
+        subject.syncableAccounts(function(err, list) {
+          if (err) return done(err);
+          assert.equal(list.length, 0);
+          done();
+        });
+      });
+    });
+  });
+
   suite('#sync: add, remove, update', function() {
     var remote;
     var events;
@@ -288,7 +503,8 @@ suite('store/account', function() {
 
       cals.update = Factory('calendar', {
         accountId: account._id,
-        remote: { name: 'update' }
+        remote: { name: 'update' },
+        error: {}
       });
     });
 
@@ -385,6 +601,8 @@ suite('store/account', function() {
         Calendar.Models.Calendar,
         'should update cache'
       );
+
+      assert.ok(!remoteUpdate.error, 'removes error');
 
       assert.equal(
         remoteUpdate.remote.description,

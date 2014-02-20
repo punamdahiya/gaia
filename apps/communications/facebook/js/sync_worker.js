@@ -1,14 +1,18 @@
 'use strict';
 
-importScripts('/contacts/js/fb/fb_query.js',
-              '/contacts/js/fb/fb_contact_utils.js', 'console.js');
+importScripts('/shared/js/fb/fb_request.js',
+              '/contacts/js/fb/fb_query.js',
+              '/contacts/js/fb/fb_contact_utils.js',
+              '/shared/js/fb/fb_reader_utils.js',
+              'console.js');
 
 (function(wutils) {
 
   var uids,
       timestamp,
       access_token,
-      forceUpdateUids;
+      forceUpdateUids,
+      targetPictureSize;
 
   wutils.addEventListener('message', processMessage);
 
@@ -127,6 +131,7 @@ importScripts('/contacts/js/fb/fb_query.js',
       timestamp = message.data.timestamp;
       forceUpdateUids = message.data.imgNeedsUpdate;
       fb.operationsTimeout = message.data.operationsTimeout;
+      targetPictureSize = message.data.targetPictureSize;
 
       debug('Worker acks contacts to check: ', Object.keys(uids).length);
 
@@ -142,6 +147,8 @@ importScripts('/contacts/js/fb/fb_query.js',
       fb.operationsTimeout = message.data.operationsTimeout;
       uids = message.data.uids;
       access_token = message.data.access_token;
+      targetPictureSize = message.data.targetPictureSize;
+
       getNewImgsForFriends(Object.keys(uids), access_token);
     }
   }
@@ -337,7 +344,8 @@ importScripts('/contacts/js/fb/fb_query.js',
     }
 
     function retrieveImg(uid) {
-      fb.utils.getFriendPicture(uid, imgRetrieved, access_token);
+      fb.utils.getFriendPicture(uid, imgRetrieved, access_token,
+                                targetPictureSize);
     }
   };
 

@@ -1,6 +1,6 @@
 'use strict';
 
-var MockContactsApp = {
+var MockContacts = {
   getLength: function(prop) {
     return prop.length;
   },
@@ -13,23 +13,23 @@ var MockContactsApp = {
   getTags: function() {
     return {
       'phone-type' : [
-        {value: 'mobile'},
-        {value: 'home'},
-        {value: 'work'},
-        {value: 'personal'},
-        {value: 'faxHome'},
-        {value: 'faxOffice'},
-        {value: 'faxOther'},
-        {value: 'another'}
+        {type: 'mobile', value: 'Mobile'},
+        {type: 'home', value: 'Home'},
+        {type: 'work', value: 'Work'},
+        {type: 'personal', value: 'Personal'},
+        {type: 'faxHome', value: 'FaxHome'},
+        {type: 'faxOffice', value: 'Fax Office'},
+        {type: 'faxOther', value: 'Fax Other'},
+        {type: 'other', value: 'Other'}
       ],
       'email-type' : [
-        {value: 'personal'},
-        {value: 'home'},
-        {value: 'work'}
+        {type: 'personal', value: 'Personal'},
+        {type: 'home', value: 'Home'},
+        {type: 'work', value: 'Work'}
       ],
       'address-type' : [
-        {value: 'home'},
-        {value: 'work'}
+        {type: 'home', value: 'Home'},
+        {type: 'work', value: 'Work'}
       ]
     };
   },
@@ -37,5 +37,33 @@ var MockContactsApp = {
   },
   loadFacebook: function(cb) {
     cb();
-  }
+  },
+  asyncScriptsLoaded: true,
+  cardStateChanged: function() {
+  },
+  extServices: {
+    importLive: function() {},
+    importGmail: function() {}
+  },
+  navigation: new MockNavigationStack(),
+  checkCancelableActivity: function() {},
+  cancel: function() {},
+  confirmDialog: function() {
+    ConfirmDialog.show.apply(ConfirmDialog, arguments);
+  },
+  utility: function(view, callback) {
+    callback();
+  },
+  view: function(view, callback) {
+    callback();
+  },
+  showOverlay: function(title, id) {
+    return {
+      'setClass': function(clazz) {},
+      'setHeaderMsg': function(msg) {},
+      'setTotal': function(total) {},
+      'update': function() {}
+    };
+  },
+  showStatus: function(status) {}
 };

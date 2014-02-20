@@ -47,8 +47,7 @@ if (!fb.link) {
     };
 
     var friendsList;
-    var viewButton = document.querySelector('#view-all');
-    var mainSection = document.querySelector('#main');
+    var viewButton, mainSection;
 
     var currentRecommendation = null;
     var allFriends = null;
@@ -58,6 +57,16 @@ if (!fb.link) {
     var state;
     var _ = navigator.mozL10n.get;
     var imgLoader;
+
+    // Only needed for testing purposes
+    var completedCb;
+
+    function notifyParent(message) {
+      parent.postMessage({
+        type: message.type || '',
+        data: message.data || ''
+      }, fb.CONTACTS_APP_ORIGIN);
+    }
 
     // Builds the first query for finding a contact to be linked to
     function buildQuery(contact) {
@@ -151,20 +160,14 @@ if (!fb.link) {
     }
 
     // Invoked when remoteAll is canceled
-    function cancelCb(notifyParent) {
+    function cancelCb(shouldNotifyParent) {
       if (currentNetworkRequest) {
         currentNetworkRequest.cancel();
         currentNetworkRequest = null;
       }
 
-      Curtain.hide();
-
-      if (notifyParent) {
-        parent.postMessage({
-            type: 'abort',
-            data: ''
-        }, fb.CONTACTS_APP_ORIGIN);
-      }
+      Curtain.hide(shouldNotifyParent ? notifyParent.bind(
+        null, {type: 'abort'}) : null);
     }
 
     // Invoked when timeout or error and the user cancels all
@@ -220,10 +223,15 @@ if (!fb.link) {
         var numFriendsProposed = data.length;
         var searchAccentsArrays = {};
         var index = 0;
+
         data.forEach(function(item) {
           if (!item.email) {
             item.email = '';
           }
+          var box = importUtils.getPreferredPictureBox();
+          item.picwidth = box.width;
+          item.picheight = box.height;
+
           // Only do this if we need to prepare the search accents phase
           if (numQueries === 2) {
             // Saving the original order
@@ -240,7 +248,7 @@ if (!fb.link) {
                   var obj = {
                     originalIndex: index
                   };
-                  obj[field] = utils.text.normalize(word).toLowerCase();
+                  obj[field] = Normalizer.toAscii(word).toLowerCase();
                   searchAccentsArrays[field].push(obj);
                 });
               }
@@ -270,6 +278,10 @@ if (!fb.link) {
 
         utils.templates.append('#friends-list', currentRecommendation);
         imgLoader.reload();
+
+        if (typeof completedCb === 'function') {
+          completedCb();
+        }
 
         Curtain.hide(function onCurtainHide() {
           sendReadyEvent();
@@ -324,7 +336,7 @@ if (!fb.link) {
           var dataToSearch = fieldToSearch[0].trim().split(/[ ]+/);
 
           dataToSearch.forEach(function(aData) {
-            var targetString = utils.text.normalize(aData).toLowerCase();
+            var targetString = Normalizer.toAscii(aData).toLowerCase();
             var searchResult = utils.binarySearch(targetString, searchArray, {
               arrayField: searchField,
               compareFunction: compareItems
@@ -458,7 +470,10 @@ if (!fb.link) {
       };
     }
 
-    link.start = function(contactId, acc_tk) {
+    link.start = function(contactId, acc_tk, endCb) {
+      // Only needed for testing purposes
+      completedCb = endCb;
+
       access_token = acc_tk;
       contactid = contactId;
 
@@ -478,6 +493,11 @@ if (!fb.link) {
       }
     };
 
+    link.init = function() {
+      mainSection = document.querySelector('#main');
+      viewButton = document.querySelector('#view-all');
+    };
+
     function retryOnErrorCb() {
       UI.selected({
         target: {
@@ -489,14 +509,12 @@ if (!fb.link) {
     }
 
     function handleTokenError() {
-      Curtain.hide();
+      Curtain.hide(notifyParent.bind(null, {
+        type: 'token_error'
+      }));
       var cb = function() {
         allFriends = null;
         link.start(contactid);
-        parent.postMessage({
-          type: 'token_error',
-          data: ''
-        }, fb.CONTACTS_APP_ORIGIN);
       };
       window.asyncStorage.removeItem(fb.utils.TOKEN_DATA_KEY, cb);
     }
@@ -512,11 +530,12 @@ if (!fb.link) {
       req.onsuccess = function() {
         if (req.result) {
           window.setTimeout(function delay() {
-            Curtain.hide(function hide() {
-              notifyParent({
+            Curtain.hide(notifyParent.bind(null, {
+              type: 'item_selected',
+              data: {
                 uid: friendUidToLink
-              });
-            });
+              }
+            }));
           }, 1000);
         }
         else {
@@ -524,9 +543,10 @@ if (!fb.link) {
           var callbacks = { };
 
           callbacks.success = function(data) {
-            Curtain.hide(function() {
-              notifyParent(data);
-            });
+            Curtain.hide(notifyParent.bind(null, {
+              type: 'item_selected',
+              data: data
+            }));
           };
 
           callbacks.error = function(e) {
@@ -548,7 +568,7 @@ if (!fb.link) {
           };
 
           FacebookConnector.importContact(friendUidToLink, access_token,
-                                          callbacks);
+                                          callbacks, 'not_match');
         }
       };
 
@@ -569,18 +589,6 @@ if (!fb.link) {
 
       parent.postMessage(msg, fb.CONTACTS_APP_ORIGIN);
     };
-
-    function notifyParent(data) {
-      var msg = {
-        type: 'item_selected',
-        data: data
-      };
-
-      parent.postMessage(msg, fb.CONTACTS_APP_ORIGIN);
-
-      // Uncomment this to make this work in B2G-Desktop
-      // parent.postMessage(msg, '*');
-    }
 
     UI.viewAllFriends = function(event) {
       if (!allFriends) {

@@ -1,5 +1,4 @@
 html, body {
-  font-family: 'MozTT', sans-serif;
   font-size: 10px;
 }
 
@@ -40,6 +39,7 @@ html, body {
 }
 
 #toaster-title {
+  pointer-events: none;
   position: absolute;
   top: 0.3rem;
   color: #52b8cc;
@@ -48,6 +48,7 @@ html, body {
 }
 
 #toaster-detail {
+  pointer-events: none;
   position: absolute;
   top: 2.2rem;
   color: white;
@@ -76,6 +77,10 @@ html, body {
   line-height: 3rem;
 }
 
+#notification-bar span[hidden] {
+  display: none;
+}
+
 #notification-bar button {
   float: right;
   margin-right: 1.5rem;
@@ -87,6 +92,10 @@ html, body {
   text-align: right;
   font-size: 1.4rem;
   font-weight: 500;
+}
+
+#notification-bar button[disabled] {
+  color: #556365;
 }
 
 /* remove ugly dotted outline when focus */
@@ -115,6 +124,10 @@ html, body {
   border-bottom: 0.1rem black solid;
 }
 
+.notification:active {
+  background-color: rgba(52,140,158, .6);
+}
+
 .notification:first-child {
   border-top-color: black;
 }
@@ -124,23 +137,20 @@ html, body {
 }
 
 .notification > div:first-of-type {
-  width: 19.5rem;
-  margin: 1rem 0 0 5rem;
+  width: calc(100% - 12rem);
+  margin-top: 1rem;
   font-size: 1.5rem;
   font-weight: 500;
-  line-height: 1.9rem;
-  color: #FFFFFF;
+  color: #fff;
 }
 
 .notification > div {
-  margin: 0 0 0 5rem;
-  padding: 0;
-  width: calc(100% - 5.5rem);
+  width: calc(100% - 6.5rem);
+  margin-left: 5rem;
   color: #bfbfbf;
   font-size: 1.4rem;
   line-height: 1.9rem;
   min-height: 1.9rem;
-  font-weight: 400;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -148,20 +158,25 @@ html, body {
 
 .notification > .timestamp {
   position: absolute;
-  right: 0;
   top: -.2rem;
+  right: 1.5rem;
   color: #52B6CC;
-  margin: 1.3rem 1.5rem 0 0;
+  margin-top: 1.3rem;
   padding: 0;
   display: inline;
+  font-size: 1.2rem;
+  font-weight: bold;
   line-height: 1.6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .notification > img {
   float: left;
   display: block;
-  width: 2.4rem;
-  height: 2.4rem;
+  width: 3rem;
+  height: 3rem;
   margin: 1.5rem 1rem;
   pointer-events: none;
 }
@@ -178,6 +193,7 @@ html, body {
 }
 
 #notifications-lockscreen-container {
+  z-index: 1;
   position: absolute;
   top: 18rem;
   left: 0;
@@ -194,4 +210,14 @@ html, body {
 
 #notifications-lockscreen-container .notification {
   background-color: transparent;
+}
+
+@keyframes fn-rotate {
+  from {
+    transform: rotate(1deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }

@@ -1,3 +1,8 @@
+@import url('../shared/style/switches.css');
+@import url('../shared/style/input_areas.css');
+@import url('../shared/style/buttons.css');
+@import url('../shared/style/edit_mode.css');
+
 html, body {
   width: 100%;
   height: 100%;
@@ -5,29 +10,73 @@ html, body {
   margin: 0;
   color: white;
   font-size: 10px;
+  background-color: 000;
 }
-
-#views {
-  background-color: #101111;
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.view {
-  width: 100%;
-  height: 100%;
-}
-
 
 #clock-view {
   width: 100%;
-  height: -moz-calc(100% - 0.13rem);
+  height: calc(100% - 0.13rem);
+
   color: black;
 }
 
+.visible {
+  display: block;
+}
+
+#clock-time {
+  letter-spacing: -0.5rem;
+  font-weight: lighter;
+  font-size: 11rem;
+  color: #CFE2E6;
+  pointer-events: none;
+}
+
+#clock-hour24-state {
+  font-weight: lighter;
+  font-size: 3.7rem;
+  color: #5C6466;
+  text-transform: uppercase;
+  pointer-events: none;
+  position: relative;
+}
+
+#clock-day-date {
+  font-weight: lighter;
+  font-size: 2.1rem;
+  margin: 2.6rem 0 0 1.5rem;
+  line-height: 1.7rem;
+  position: absolute;
+  color: #737D80;
+  width: 100%;
+  top: 0;
+}
+
+#clock-day-date b {
+  font-weight: normal;
+  color: #A1B0B2;
+}
+
+/* digital clock */
+#digital-clock {
+  display: none;
+  margin-top: 6.50rem;
+  height: 100%;
+}
+
+#digital-clock.visible {
+  display: block;
+}
+
+#digital-clock-face {
+  font-weight: lighter;
+  text-align: center;
+  position: absolute;
+  width: 100%;
+  margin: auto;
+}
+
+/* analog clock */
 #analog-clock {
   display: none;
   width: 100%;
@@ -38,143 +87,71 @@ html, body {
   display: block;
 }
 
-.visible {
-  display: block;
-}
-
-#digital-clock-background {
-  height: 100%;
-  overflow: hidden;
-  background-image: none;
-  display: none;
-}
-
-#digital-clock-background.visible {
-  height: 22.1rem; /* 48%; */
-  display: block;
-  background: url(images/digital_bk.png) repeat-x left bottom / auto 100%;
-}
-
-#digital-clock {
-  margin-top: 6.50rem;
-  display: none;
-}
-
-#digital-clock.visible {
-  display: block;
-}
-
-#digital-clock-display {
- text-align: center;
-  position: absolute;
-  width: 100%;
-  margin: auto;
-}
-
-#clock-time {
-  letter-spacing: -0.5rem;
-  font: lighter 11rem 'MozTT', sans-serif;
-  color: #CFE2E6;
-  pointer-events: none;
-}
-
-#clock-hour24-state {
-  font: 3.7rem 'MozTT', sans-serif;
-  color: #5C6466;
-  text-transform: uppercase;
-  pointer-events: none;
-  position: relative;
-}
-
-#clock-hour24-state.alarm-set-indicator::after {
-  background: url("images/alarm_indicator.png") no-repeat;
-  background-size: 1.8rem;
-  position: absolute;
-  height: 1.8rem;
-  width: 1.8rem;
-  top: -4.2rem;
-  left: 1.6rem;
-  content: "";
-}
-
-#clock-day-date {
-  font: lighter normal 2.1rem 'MozTT', sans-serif;
-  margin: 2.6rem 0 0 1.5rem;
-  line-height: 1.7rem;
-  position: absolute;
-  color: #737D80;
-  width: 100%;
-  top: 0;
-}
-
-#clock-day-date b {
-  font-family: MozTT;
-  font-weight: normal;
-}
-
+/* Make sure the rotating hand elements are never clickable outside of our box */
 #analog-clock-container {
+  pointer-events: none;
+  overflow: hidden;
+}
+
+#analog-clock-container.large {
+  width: 27rem;
+  height: 27rem;
+  margin: 6.9rem auto 0;
+}
+
+#analog-clock-container.medium {
+  width: 21.8rem;
+  height: 21.8rem;
+  margin: 6.8rem auto 0;
+}
+
+#analog-clock-container.small {
+  width: 14.8rem;
+  height: 14.8rem;
+  margin: 5.8rem auto 0;
+}
+
+#analog-clock-face {
   position: relative;
+
+  width: 100%;
+  height: 100%;
+
+  background-image: url('images/analog_clock_face.svg');
   background-repeat: no-repeat;
-  background-size: 100%;
-  margin: 8.8rem auto 0;
+  background-size: 100% 100%;
 }
 
-/*270x270*/
-#analog-clock-container.marks1 {
-  background-image: url(images/analog_clock_marks1.png);
-  background-size: 27rem;
-  width: 27rem; height: 27rem;
-}
-#analog-clock-container.marks1 svg {
-  width: 27rem; height: 27rem;
+#analog-clock-hands {
+  position: absolute;
+  z-index: 2;
+
+  width: 100%;
+  height: 100%;
+  margin-top: 1.5%; /* to correctly snap the hands to the face */
 }
 
-/*248x248*/
-#analog-clock-container.marks2 {
-  background-image: url(images/analog_clock_marks2.png);
-  width: 24.8rem; height: 24.8rem;
-  margin-top: 6.9rem;
-}
-#analog-clock-container.marks2 svg {
-  width: 24.8rem; height: 24.8rem;
+.analog-clock-hand {
+  position: absolute;
+  z-index: 2;
+
+  width: 100%;
+  height: 100%;
+
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
 }
 
-/*198x198*/
-#analog-clock-container.marks3 {
-  background-image: url(images/analog_clock_marks3.png);
-  width: 19.8rem; height: 19.8rem;
-  margin-top: 6.2rem;
-}
-#analog-clock-container.marks3 svg {
-  width: 19.8rem; height: 19.8rem;
+#secondhand {
+  background-image: url('images/analog_clock_second_hand.svg');
 }
 
-/*148x148*/
-#analog-clock-container.marks4 {
-  background-image: url(images/analog_clock_marks4.png);
-  width: 14.8rem; height: 14.8rem;
-  margin-top: 5.8rem;
-}
-#analog-clock-container.marks4 svg {
-  width: 14.8rem; height: 14.8rem;
+#minutehand {
+  background-image: url('images/analog_clock_minute_hand.svg');
 }
 
-/* These CSS styles all apply to the SVG clock elements */
-#analog-clock-svg { /* styles for everything in the clock */
-  stroke-linecap: butt; /* with butt ends */
-  fill: transparent; /* on a transparent background */
-}
-#hourhand, #minutehand, #minutehandCentralPoint {
-  fill: #CFE2E6;
-  stroke-width: 0rem;
-}
-
-#secondhand, #secondhandCentralPoint { /* narrow blue second hand */
-  fill: #597980;
-}
-
-#minutehandCentralPoint { /* dark-gray central point*/
-  stroke-width: 0rem;
+#hourhand {
+  background-image: url('images/analog_clock_hour_hand.svg');
 }
 
 /* banner*/
@@ -188,7 +165,8 @@ html, body {
   opacity: 1;
   -moz-transition: all 600ms ease;
 }
-#banner-countdown > p > strong {
+
+#banner-countdown strong {
   white-space: nowrap;
 }
 
@@ -197,3 +175,6 @@ body.hidden *[data-l10n-id] {
   visibility: hidden;
 }
 
+.hide {
+  display: none;
+}

@@ -2,8 +2,6 @@ import os
 from setuptools import setup, find_packages
 import shutil
 
-version = '0.4'
-
 # get documentation from the README
 try:
     here = os.path.dirname(os.path.abspath(__file__))
@@ -11,8 +9,13 @@ try:
 except (OSError, IOError):
     description = ''
 
+# version number
+version = {}
+execfile(os.path.join('gaiatest', 'version.py'), version)
+
 # dependencies
-deps = ['marionette_client', 'mozdevice']
+with open('requirements.txt') as f:
+    deps = f.read().splitlines()
 
 # copy atoms directory over
 setupdir = os.path.dirname(__file__)
@@ -31,7 +34,7 @@ else:
         raise Exception('JS atoms not found in %s or %s!' % (jsdir, pythondir))
 
 setup(name='gaiatest',
-      version=version,
+      version=version['__version__'],
       description="Marionette test automation client for Gaia",
       long_description=description,
       classifiers=[],  # Get strings from http://pypi.python.org/pypi?%3Aaction=list_classifiers
@@ -41,13 +44,14 @@ setup(name='gaiatest',
       url='https://developer.mozilla.org/en-US/docs/Marionette',
       license='MPL',
       packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
-      package_data={'gaiatest': ['atoms/*.js']},
+      package_data={'gaiatest': [
+          'atoms/*.js',
+          'resources/report/jquery.js',
+          'resources/report/main.js',
+          'resources/report/style.css']},
       include_package_data=True,
       zip_safe=False,
-      entry_points="""
-      # -*- Entry points: -*-
-      [console_scripts]
-      gaiatest = gaiatest.runtests:main
-      """,
-      install_requires=deps,
-      )
+      entry_points={'console_scripts': [
+          'gaiatest = gaiatest.runtests:main',
+          'gcli = gaiatest.gcli:cli']},
+      install_requires=deps)

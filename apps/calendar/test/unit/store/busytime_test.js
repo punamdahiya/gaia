@@ -5,7 +5,6 @@ requireLib('store/busytime.js');
 requireLib('store/alarm.js');
 
 suite('store/busytime', function() {
-
   var app;
   var subject;
   var db;
@@ -56,7 +55,6 @@ suite('store/busytime', function() {
   }
 
   setup(function(done) {
-    this.timeout(5000);
     id = 0;
     app = testSupport.calendar.app();
     db = app.db;
@@ -142,30 +140,6 @@ suite('store/busytime', function() {
           });
         });
       });
-    });
-  });
-
-  suite('#factory', function() {
-    test('using defaults', function() {
-      var event = Factory('event');
-      var result = subject.factory(event);
-
-      assert.deepEqual(result.start, event.remote.start);
-      assert.deepEqual(result.end, event.remote.end);
-      assert.equal(result.eventId, event._id);
-      assert.equal(result.calendarId, event.calendarId);
-    });
-
-    test('with start/end date', function() {
-      var event = Factory('event');
-
-      var start = Calendar.Calc.dateToTransport(new Date(2012, 0, 1));
-      var end = Calendar.Calc.dateToTransport(new Date(2012, 0, 2));
-
-      var result = subject.factory(event, start, end);
-
-      assert.deepEqual(result.start, start);
-      assert.deepEqual(result.end, end);
     });
   });
 
