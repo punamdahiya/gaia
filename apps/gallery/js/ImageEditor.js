@@ -51,6 +51,26 @@ function resizeHandler() {
   imageEditor.resize();
 }
 
+function logData(obj, name) {
+    console.log('Log values for:', name);
+    for (var key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        console.log(key);
+        console.log(obj[key]);
+        if(key === 'FocalLength' ||
+          key === 'XResolution' ||
+          key === 'YResolution') {
+            for (var key1 in obj[key]) {
+              if (obj[key].hasOwnProperty(key1)) {
+                console.log(key1);
+                console.log('Inner Metadata val:', obj[key][key1]);
+              }
+            }
+        }
+      }
+    }
+  }
+
 function parseExifMetaData(exifMetaData) {
   // Parse exifMetaData to omit properties that are not
   // having correct value for edited image.
@@ -413,6 +433,8 @@ function saveEditedImage() {
       version++;
       filename = basename + '.edit' + version + extension;
     }
+
+    logData(originalExifData, 'Gallery EDIT EXIF');
 
     if (originalExifData) {
       // Write parsed EXIF data from original image to edited blob
@@ -1372,6 +1394,7 @@ ImageEditor.prototype.getCroppedRegionBlob = function(type,
                 // Delete EXIF properties that are not
                 // having correct value for edited image
                 exifMetaData = parseExifMetaData(exifMetaData);
+                logData(exifMetaData, 'Gallery Crop EXIF');
                 // Write parsed EXIF data from original image to edited blob
                 JPEG.writeExifMetaData(blob, exifMetaData,
                   function(error, result) {
