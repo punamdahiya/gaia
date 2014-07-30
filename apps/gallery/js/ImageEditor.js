@@ -4,6 +4,8 @@
 var editedPhotoURL; // The blob URL of the photo we're currently editing
 var editSettings;
 var imageEditor;
+var currentEditMode; // Selected Edit Mode
+var savedEditSettings;
 
 var editOptionButtons =
   Array.slice($('edit-options').querySelectorAll('a.radio.button'), 0);
@@ -18,6 +20,8 @@ $('edit-effect-button').onclick = setEditTool.bind(null, 'effect');
 $('edit-enhance-button').onclick = setEditTool.bind(null, 'enhance');
 $('edit-crop-none').onclick = undoCropHandler;
 $('edit-cancel-button').onclick = function() { exitEditMode(false); };
+$('edit-modes-cancel-button').onclick = setEditTool.bind(null, null);
+$('edit-modes-apply-button').onclick = applyEditOptions;
 $('edit-save-button').onclick = saveEditedImage;
 editOptionButtons.forEach(function(b) { b.onclick = editOptionsHandler; });
 
@@ -47,14 +51,27 @@ function editPhoto(n) {
   editedPhotoIndex = n;
   var metadata = files[n].metadata;
 
+  // Click of cancel in edit mode, ignores any changes
+  // made in specific edit mode and returns to editor screen.
+  // Save previous edit options applied in different edit modes
+  // to revert to previous changes on click of cancel.
   // Start with no edits
   editSettings = {
     crop: {
-      x: 0, y: 0, w: metadata.width, h: metadata.height
+      x: 0, y: 0, w: metadata.width, h: metadata.height,
+      selectedNodeId: 'edit-crop-aspect-free'
     },
-    gamma: 1,
-    matrix: ImageProcessor.IDENTITY_MATRIX,
-    rgbMinMaxValues: ImageProcessor.default_enhancement
+    exposure: {
+      sliderExposure: 0,
+      gamma: 1
+    },
+    effect: {
+      selectedNodeId: 'edit-effect-none',
+      matrix: ImageProcessor.IDENTITY_MATRIX
+    },
+    enhance: {
+      rgbMinMaxValues: ImageProcessor.default_enhancement
+    }
   };
 
   // Start looking up the image file
@@ -96,12 +113,19 @@ function editPhoto(n) {
     imageEditor = new ImageEditor(blob,
                                   $('edit-preview-area'),
                                   editSettings);
-
-    // Configure the exposure tool as the first one shown
-    setEditTool('exposure');
+    // Show editor and hide edit mode
+    hideEditModeView();
+    savedEditSettings = objCopy(editSettings);
 
     // Set the exposure slider to its default value
     exposureSlider.setExposure(0);
+    // Set auto enhance icon to default off state
+    $('edit-enhance-button').classList.remove('on');
+    // Disable save and mode apply button until an edit is applied
+    $('edit-save-button').disabled = true;
+    $('edit-modes-apply-button').disabled = true;
+
+    $('edit-title').setAttribute('data-l10n-id', 'edit');
 
     window.addEventListener('resize', resizeHandler);
 
@@ -141,6 +165,16 @@ function editOptionsHandler() {
   Array.forEach(buttons, function(b) { b.classList.remove('selected'); });
   this.classList.add('selected');
 
+   if (this.dataset.effect) {
+    editSettings.effect.selectedNodeId =
+      $('edit-effect-options').getElementsByClassName('selected')[0].id;
+  } else {
+    editSettings.crop.selectedNodeId =
+      $('edit-crop-options').getElementsByClassName('selected')[0].id;
+  }
+
+  applyButtonState();
+
   if (this === $('edit-crop-aspect-free'))
     imageEditor.setCropAspectRatio();
   else if (this === $('edit-crop-aspect-portrait'))
@@ -150,7 +184,8 @@ function editOptionsHandler() {
   else if (this === $('edit-crop-aspect-square'))
     imageEditor.setCropAspectRatio(1, 1);
   else if (this.dataset.effect) {
-    editSettings.matrix = ImageProcessor[this.dataset.effect + '_matrix'];
+    editSettings.effect.matrix =
+      ImageProcessor[this.dataset.effect + '_matrix'];
     imageEditor.edit();
   }
 }
@@ -275,51 +310,229 @@ var exposureSlider = (function() {
       // Convert the exposure compensation stops gamma correction value.
       var factor = -1;  // Adjust this factor to get something reasonable.
       var gamma = Math.pow(2, stops * factor);
-      editSettings.gamma = gamma;
+      editSettings.exposure.gamma = gamma;
+      editSettings.exposure.sliderExposure = stops;
       imageEditor.edit();
+      applyButtonState();
     });
   };
 }());
 
-function setEditTool(tool) {
-  // Deselect all tool buttons and hide all options
-  var buttons = $('edit-toolbar').querySelectorAll('a.button');
-  Array.forEach(buttons, function(b) { b.classList.remove('selected'); });
-  var options = $('edit-options').querySelectorAll('div.edit-options-bar');
-  Array.forEach(options, function(o) { o.classList.add('hidden'); });
+// Handle show and hide of edit mode screen
+function showEditModeView() {
+  var editToolbar = $('edit-toolbar');
+  var editHeader = $('edit-header');
+  var editHeaderElements = editHeader.querySelectorAll('.edit');
+  var editModeHeaderElements = editHeader.querySelectorAll('.edit-mode');
+  // Hide Editor toolbar and header
+  editToolbar.classList.add('hidden');
+  Array.forEach(editHeaderElements,
+                function(o) { o.classList.add('hidden'); });
 
-  // If we were in crop mode, perform the crop and then
-  // exit crop mode. If the user tapped the Crop button then we'll go
-  // right back into crop mode, but this means that the Crop button both
-  // acts as a mode switch button and a "do the crop now" button.
-  imageEditor.cropImage(function() {
-    imageEditor.hideCropOverlay();
+  // Show Edit Mode options and header
+  $('edit-options').classList.remove('hidden');
+  Array.forEach(editModeHeaderElements,
+                function(o) { o.classList.remove('hidden'); });
+}
 
-    // Now select and show the correct set based on tool
-    switch (tool) {
+function hideEditModeView() {
+  var editToolbar = $('edit-toolbar');
+  var editHeader = $('edit-header');
+  var editHeaderElements = editHeader.querySelectorAll('.edit');
+  var editModeHeaderElements = editHeader.querySelectorAll('.edit-mode');
+  // Show Editor toolbar and header
+  editToolbar.classList.remove('hidden');
+  Array.forEach(editHeaderElements,
+                function(o) { o.classList.remove('hidden'); });
+
+  // Hide Edit Mode options and header
+  $('edit-options').classList.add('hidden');
+  Array.forEach(editModeHeaderElements,
+                function(o) { o.classList.add('hidden'); });
+}
+
+// Apply changes made in specific edit mode
+// Other edit modes - exposure, effects, enhance apply
+// their edits as the user interacts
+// with the buttons or slider
+function applyEditOptions() {
+  hideEditModeView();
+  saveButtonState();
+  switch (currentEditMode) {
+    case 'crop':
+     imageEditor.cropImage(function() {
+       imageEditor.hideCropOverlay();
+     });
+     break;
+  }
+  currentEditMode = null;
+  savedEditSettings = null;
+  $('edit-title').setAttribute('data-l10n-id', 'edit');
+}
+
+function saveButtonState() {
+    // Enable save and mode apply button until an edit is applied
+  $('edit-save-button').disabled = true;
+  //$('edit-modes-apply-button').disabled = false;
+  if (editSettings.crop.selectedNodeId !== 'edit-crop-aspect-free' ||
+      editSettings.effect.selectedNodeId !== 'edit-effect-none' ||
+      editSettings.enhance.rgbMinMaxValues !==
+       ImageProcessor.default_enhancement ||
+      editSettings.exposure.sliderExposure !== 0) {
+    $('edit-save-button').disabled = false;
+  }
+}
+
+function applyButtonState() {
+    // Enable save and mode apply button until an edit is applied
+  $('edit-modes-apply-button').disabled = true;
+  if (editSettings.crop.selectedNodeId !==
+        savedEditSettings.crop.selectedNodeId ||
+      editSettings.effect.selectedNodeId !==
+        savedEditSettings.effect.selectedNodeId ||
+      editSettings.exposure.sliderExposure !==
+        savedEditSettings.exposure.sliderExposure) {
+    $('edit-modes-apply-button').disabled = false;
+  }
+/*
+  if(editSettings !== savedEditSettings) {
+    $('edit-modes-apply-button').disabled = false;
+  }*/
+}
+
+function objCopy(obj) {
+  if (obj === null || !(obj instanceof Object)) {
+    return obj;
+  }
+  var clone = obj.constructor();
+  for (var key in obj) {
+    if (obj.hasOwnProperty(key)) {
+      clone[key] = objCopy(obj[key]);
+    }
+  }
+  return clone;
+}
+
+// Toggle the auto enhancement on/off.
+function setAutoEnhanceState(isEnhanced) {
+  var statusLabel = $('edit-enhance-status');
+  var enhanceButton = $('edit-enhance-button');
+  var banner = $('edit-enhance-banner');
+  function showStatus(msg) {
+    navigator.mozL10n.setAttributes(statusLabel, msg);
+    banner.hidden = false;
+    setTimeout(function() {
+      banner.hidden = true;
+    }, 3000);
+  }
+  if (isEnhanced) {
+    showStatus('enhance-on');
+    enhanceButton.classList.add('on');
+  } else {
+    showStatus('enhance-off');
+    enhanceButton.classList.remove('on');
+  }
+}
+
+function setEditTool(editMode) {
+  // Do any necessary cleanup of the view we're exiting
+  switch (currentEditMode) {
     case 'exposure':
-      $('edit-exposure-button').classList.add('selected');
-      $('exposure-slider').classList.remove('hidden');
-      exposureSlider.forceSetExposure(exposureSlider.getExposure());
+      if (editSettings.exposure.gamma !== savedEditSettings.exposure.gamma) {
+        editSettings.exposure.gamma = savedEditSettings.exposure.gamma;
+        editSettings.exposure.sliderExposure =
+          savedEditSettings.exposure.sliderExposure;
+      }
       break;
     case 'crop':
-      $('edit-crop-button').classList.add('selected');
-      $('edit-crop-options').classList.remove('hidden');
+      var selectedCropId = editSettings.crop.selectedNodeId;
+      var previousCropId = savedEditSettings.crop.selectedNodeId;
+
+      // Check if previous crop options selected node
+      // is same as current selected crop options node
+      // If not, revert selection to previous applied option node.
+      if (selectedCropId !== previousCropId) {
+        $(selectedCropId).classList.remove('selected');
+        $(previousCropId).classList.add('selected');
+        editSettings.crop.selectedNodeId = previousCropId;
+      }
+      break;
+    case 'effect':
+      if (editSettings.effect.matrix !== savedEditSettings.effect.matrix) {
+        editSettings.effect.matrix = savedEditSettings.effect.matrix;
+      }
+      var selectedEffectId = editSettings.effect.selectedNodeId;
+      var previousEffectId = savedEditSettings.effect.selectedNodeId;
+
+      // Check if previous effect options selected node
+      // is same as current selected effect options node
+      // If not, revert selection to previous applied option node.
+      if (selectedEffectId !== previousEffectId) {
+        $(selectedEffectId).classList.remove('selected');
+        $(previousEffectId).classList.add('selected');
+        editSettings.effect.selectedNodeId = previousEffectId;
+      }
+      break;
+  }
+  // Hide all options
+  var options = $('edit-options').querySelectorAll('div.edit-options-bar');
+  Array.forEach(options, function(o) { o.classList.add('hidden'); });
+  $('edit-enhance-banner').hidden = true;
+
+  // Now select and show the correct set based on editMode
+  switch (editMode) {
+    case 'exposure':
+      savedEditSettings = objCopy(editSettings);
+      showEditModeView();
+      $('exposure-slider').classList.remove('hidden');
+      $('edit-title').setAttribute('data-l10n-id', 'exposure');
+      // Set the current exposure value in previousEdits
+      // before updating exposure settings
+      var exposure = editSettings.exposure.sliderExposure;
+      exposureSlider.forceSetExposure(exposure);
+      applyButtonState();
+      break;
+    case 'crop':
+      savedEditSettings = objCopy(editSettings);
+      showEditModeView();
+      applyButtonState();
+      var editCropOptions = $('edit-crop-options');
+      editCropOptions.classList.remove('hidden');
+      $('edit-title').setAttribute('data-l10n-id', 'crop');
       imageEditor.edit(function() {
         imageEditor.showCropOverlay();
       });
       break;
     case 'effect':
-      $('edit-effect-button').classList.add('selected');
-      $('edit-effect-options').classList.remove('hidden');
+      savedEditSettings = objCopy(editSettings);
+      showEditModeView();
+      applyButtonState();
+      var editEffectOptions = $('edit-effect-options');
+      editEffectOptions.classList.remove('hidden');
+      $('edit-title').setAttribute('data-l10n-id', 'filters');
       break;
     case 'enhance':
-      $('edit-enhance-button').classList.add('selected');
-      $('edit-enhance-options').classList.remove('hidden');
-      imageEditor.autoEnhancement();
+      savedEditSettings = objCopy(editSettings);
+      // Enable save and mode apply button until an edit is applied
+      imageEditor.autoEnhancement(setAutoEnhanceState);
+      saveButtonState();
+      $('edit-title').setAttribute('data-l10n-id', 'edit');
       break;
-    }
-  });
+    case null:
+      // Restore the image to its previous settings
+      // and hide crop overlay if overlay is shown
+      // Initializes the UI for each edit mode
+      // to the current state.
+      imageEditor.edit(function() {
+        imageEditor.hideCropOverlay();
+      });
+      savedEditSettings = null;
+      hideEditModeView();
+      saveButtonState();
+      $('edit-title').setAttribute('data-l10n-id', 'edit');
+      break;
+  }
+  currentEditMode = editMode;
 }
 
 function undoCropHandler() {
@@ -331,6 +544,9 @@ function undoCropHandler() {
 
   // And revert to full-size image
   imageEditor.undoCrop();
+  editSettings.crop.selectedNodeId = 'edit-crop-aspect-free';
+  savedEditSettings.crop.selectedNodeId = 'edit-crop-aspect-free';
+  applyButtonState();
 }
 
 function exitEditMode(saved) {
@@ -344,6 +560,8 @@ function exitEditMode(saved) {
   // close the editor object
   imageEditor.destroy();
   imageEditor = null;
+  currentEditMode = null;
+  savedEditSettings = null;
 
   window.removeEventListener('resize', resizeHandler);
 
@@ -358,9 +576,9 @@ function exitEditMode(saved) {
   // right next to the old one and we should go back to fullscreenView to view
   // the edited photo.
   if (saved) {
-    if (isPhone) {
-      setView(LAYOUT_MODE.list);
-    } else {
+   // if (isPhone) {
+    //  setView(LAYOUT_MODE.list);
+    //} else {
       // After we sucessfully save a picture, we need to make sure that the
       // current file will point to it. We need a flag for fileCreated(),
       // so that the currentFileIndex will stay at 0 which is the newest one.
@@ -369,7 +587,7 @@ function exitEditMode(saved) {
       // latest file, then we go to fullscreen mode to see the edited picture.
       // picture on tablet.
       setView(LAYOUT_MODE.fullscreen);
-    }
+    //}
   } else {
     setView(LAYOUT_MODE.fullscreen);
     showFile(currentFileIndex);
@@ -416,6 +634,7 @@ function saveEditedImage() {
   function gotBlob(blob) {
     // Hide progressbar when saved.
     progressBar.classList.add('hidden');
+
     var original = files[editedPhotoIndex].name;
     var basename, extension, filename;
     var version = 1;
@@ -1384,24 +1603,23 @@ ImageEditor.prototype.getCropRegion = function() {
   };
 };
 
-// Toggle the auto enhancement on/off.
-ImageEditor.prototype.autoEnhancement = function() {
-  var statusLabel = $('edit-enhance-status');
-  var enhanceButton = $('edit-enhance-button');
-
-  if (this.edits.rgbMinMaxValues == ImageProcessor.default_enhancement) {
+ImageEditor.prototype.autoEnhancement = function(callback) {
+  var enhanced = false;
+  if (this.edits.enhance.rgbMinMaxValues ==
+      ImageProcessor.default_enhancement) {
     if (this.autoEnhanceValues) {
-      statusLabel.textContent = navigator.mozL10n.get('enhance-on');
-      enhanceButton.classList.add('on');
-      this.edits.rgbMinMaxValues = this.autoEnhanceValues;
+      enhanced = true;
+      this.edits.enhance.rgbMinMaxValues = this.autoEnhanceValues;
     }
   } else {
-    this.edits.rgbMinMaxValues = ImageProcessor.default_enhancement;
-    statusLabel.textContent = navigator.mozL10n.get('enhance-off');
-    enhanceButton.classList.remove('on');
+    enhanced = false;
+    this.edits.enhance.rgbMinMaxValues = ImageProcessor.default_enhancement;
   }
   //Apply the effect or restore the preview without it.
   this.edit();
+  if (callback) {
+    callback(enhanced);
+  }
 };
 
 ImageEditor.prototype.prepareAutoEnhancement = function(pixel) {
@@ -1615,18 +1833,19 @@ ImageProcessor.prototype.draw = function(image, needsUpload,
 
   // Set the gamma correction
   var gammaArray;
-  if (options.gamma)
+  if (options.exposure.gamma)
     gl.uniform4f(this.gammaAddress,
-                 options.gamma, options.gamma, options.gamma, options.gamma);
+                 options.exposure.gamma, options.exposure.gamma,
+                 options.exposure.gamma, options.exposure.gamma);
   else
     gl.uniform4f(this.gammaAddress, 1, 1, 1, 1);
 
   // Set the color transformation
   gl.uniformMatrix4fv(this.matrixAddress, false,
-                      options.matrix || ImageProcessor.IDENTITY_MATRIX);
+                      options.effect.matrix || ImageProcessor.IDENTITY_MATRIX);
 
   // set rgb max/min values for auto Enhancing
-  var minMaxValuesMatrix = options.rgbMinMaxValues ||
+  var minMaxValuesMatrix = options.enhance.rgbMinMaxValues ||
                            ImageProcessor.default_enhancement;
   gl.uniform3f(this.rgbMinAddress,
                minMaxValuesMatrix[0],
