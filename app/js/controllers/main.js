@@ -134,6 +134,7 @@ export default class MainController extends Controller {
       .then(() => this.view.open())
       .then(() => {
         this.view.customizer.setRootNode(document.documentElement);
+        console.log('punam:my first edit');
         this._waitToBeClosed();
       });
   }
